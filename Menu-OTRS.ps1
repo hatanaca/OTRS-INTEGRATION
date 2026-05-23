@@ -103,13 +103,15 @@ function Pause-Screen {
 function Load-Config {
     param([string]$Path)
     $cfg = @{
-        BaseURL     = 'http://172.16.0.12/znuny'
-        Username    = ''
-        Password    = ''
-        EstadoFile  = 'estado_chamados.json'
-        OutputPath  = $PWD.Path
-        SearchPath  = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
-        HubBaseURL  = 'http://172.16.0.49:3210'
+        BaseURL         = 'http://172.16.0.12/znuny'
+        Username        = ''
+        Password        = ''
+        EstadoFile      = 'estado_chamados.json'
+        OutputPath      = $PWD.Path
+        SearchPath      = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
+        HubBaseURL      = 'http://172.16.0.49:3210'
+        SleepArticleMs  = 10
+        SleepTicketMs   = 25
     }
     if (Test-Path $Path) {
         try {
@@ -121,6 +123,8 @@ function Load-Config {
             if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
             if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
             if ($j.HubBaseURL)  { $cfg.HubBaseURL  = $j.HubBaseURL  }
+            if ($null -ne $j.SleepArticleMs) { $cfg.SleepArticleMs = [int]$j.SleepArticleMs }
+            if ($null -ne $j.SleepTicketMs)  { $cfg.SleepTicketMs  = [int]$j.SleepTicketMs  }
         } catch { }
     }
     return $cfg
@@ -129,13 +133,15 @@ function Load-Config {
 function Save-Config {
     param([hashtable]$Cfg, [string]$Path)
     [ordered]@{
-        BaseURL     = $Cfg.BaseURL
-        Username    = $Cfg.Username
-        Password    = $Cfg.Password
-        EstadoFile  = $Cfg.EstadoFile
-        OutputPath  = $Cfg.OutputPath
-        SearchPath  = $Cfg.SearchPath
-        HubBaseURL  = $Cfg.HubBaseURL
+        BaseURL         = $Cfg.BaseURL
+        Username        = $Cfg.Username
+        Password        = $Cfg.Password
+        EstadoFile      = $Cfg.EstadoFile
+        OutputPath      = $Cfg.OutputPath
+        SearchPath      = $Cfg.SearchPath
+        HubBaseURL      = $Cfg.HubBaseURL
+        SleepArticleMs  = $(if ($null -ne $Cfg.SleepArticleMs) { [int]$Cfg.SleepArticleMs } else { 10 })
+        SleepTicketMs   = $(if ($null -ne $Cfg.SleepTicketMs)  { [int]$Cfg.SleepTicketMs  } else { 25 })
     } | ConvertTo-Json | Out-File $Path -Encoding UTF8
 }
 
@@ -656,13 +662,45 @@ function Get-TicketDataFromHtml {
 '@
     $rowMatches = [regex]::Matches($HTML, $rowPattern)
 
+    # Linhas de artigo (sem baixar corpo ainda). Em modo limitado (ex.: 4 notas no live),
+    # ordena por data decrescente para buscar primeiro as mais recentes e parar cedo.
+    $rowList = [System.Collections.Generic.List[object]]::new()
     foreach ($row in $rowMatches) {
         $rowHtml = $row.Groups[1].Value
         if (($m = [regex]::Match($rowHtml, '<input[^>]+class="ArticleID"[^>]+value="(\d+)"')).Success) { $aid = $m.Groups[1].Value } else { $aid = $null }
         if (($m = [regex]::Match($rowHtml, '<td class="Created">[^<]*<div title="([^"]+)"')).Success) { $adate = $m.Groups[1].Value } else { $adate = 'N/D' }
         if (-not $aid) { continue }
+        $sortKey = [datetime]::MinValue
+        if ($adate -match '^(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})') {
+            try {
+                $sortKey = Get-Date -Year ([int]$Matches[3]) -Month ([int]$Matches[2]) -Day ([int]$Matches[1]) `
+                    -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second 0
+            } catch {}
+        }
+        $rowList.Add([ordered]@{ Row = $rowHtml; Aid = $aid; Adate = $adate; SortKey = $sortKey })
+    }
+
+    $unlimitedArticles = ($maxArticles -ge 9000)
+    $unlimitedFetch = ($fetchLimit -ge 9000)
+    $fetchCount = 0
+
+    $walk = [System.Collections.Generic.List[object]]::new()
+    if ($unlimitedArticles) {
+        foreach ($x in $rowList) { $walk.Add($x) }
+    } else {
+        foreach ($x in ($rowList | Sort-Object { $_.SortKey } -Descending)) { $walk.Add($x) }
+    }
+
+    foreach ($item in $walk) {
+        if (-not $unlimitedArticles -and $articles.Count -ge $maxArticles) { break }
+        if (-not $unlimitedFetch -and $fetchCount -ge $fetchLimit) { break }
+
+        $rowHtml = $item.Row
+        $aid     = $item.Aid
+        $adate   = $item.Adate
         try {
             $raw = $client.GetArticleContent($ticketID, $aid)
+            $fetchCount++
             $raw = $raw -replace '(?s)<style[^>]*>.*?</style>', ''
             $raw = $raw -replace '(?s)<script[^>]*>.*?</script>', ''
             if (($m = [regex]::Match($raw, '(?s)<body[^>]*>(.*)</body>')).Success) { $body = $m.Groups[1].Value.Trim() } else { $body = '' }
@@ -679,7 +717,7 @@ function Get-TicketDataFromHtml {
             if ($text.Length -ge 5 -and -not (Test-AutoNote $text)) {
                 $articles.Add([PSCustomObject]@{ Date = $adate; Text = $text })
             }
-            Start-Sleep -Milliseconds $sleepMs
+            if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
         } catch { Write-Verbose "Erro ao obter artigo $aid para ticket $ticketID" }
     }
     $articles.Reverse()
@@ -744,8 +782,8 @@ function Export-CcoReport {
         [int]$MaxArticles = 9999,
         [int]$FetchLimit = 9999,
         [int]$RetryMax = 3,
-        [int]$SleepArticleMs = 50,
-        [int]$SleepTicketMs = 100,
+        [int]$SleepArticleMs = 10,
+        [int]$SleepTicketMs = 25,
         [switch]$AbrirRelatorio,
         [switch]$DiagMode
     )
@@ -852,7 +890,7 @@ function Export-CcoReport {
                 $ativos.Add($ticket)
             }
             $httpCount++
-            Start-Sleep -Milliseconds $SleepTicketMs
+            if ($SleepTicketMs -gt 0) { Start-Sleep -Milliseconds $SleepTicketMs }
         } catch {
             Write-Warning "Falha ao processar ticket $tid : $_"
         }
@@ -930,6 +968,9 @@ function Invoke-GerarTxt {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    $sa = 10; $st = 25
+    if ($null -ne $Cfg.SleepArticleMs) { $sa = [int]$Cfg.SleepArticleMs }
+    if ($null -ne $Cfg.SleepTicketMs)  { $st = [int]$Cfg.SleepTicketMs }
     $params = @{
         BaseURL        = $Cfg.BaseURL
         Username       = $Cfg.Username
@@ -937,6 +978,8 @@ function Invoke-GerarTxt {
         SearchPath     = $Cfg.SearchPath
         EstadoFile     = $Cfg.EstadoFile
         OutputDir      = $Cfg.OutputPath
+        SleepArticleMs = $sa
+        SleepTicketMs  = $st
         AbrirRelatorio = $false
         DiagMode       = $false
     }
@@ -971,6 +1014,9 @@ function Invoke-GerarJson {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    $sa = 10; $st = 25
+    if ($null -ne $Cfg.SleepArticleMs) { $sa = [int]$Cfg.SleepArticleMs }
+    if ($null -ne $Cfg.SleepTicketMs)  { $st = [int]$Cfg.SleepTicketMs }
     $params = @{
         BaseURL        = $Cfg.BaseURL
         Username       = $Cfg.Username
@@ -978,6 +1024,8 @@ function Invoke-GerarJson {
         SearchPath     = $Cfg.SearchPath
         EstadoFile     = $Cfg.EstadoFile
         OutputDir      = $Cfg.OutputPath
+        SleepArticleMs = $sa
+        SleepTicketMs  = $st
         AbrirRelatorio = $false
         DiagMode       = $false
     }
@@ -1104,7 +1152,7 @@ function Get-LiveTickets {
     $ownClient = $false
     $client = $SessionClient
     if ($null -eq $client) {
-        $client = [OtrsClient]::new($Cfg.BaseURL, 45)
+        $client = [OtrsClient]::new($Cfg.BaseURL, 8)
         $client.Login($Cfg.Username, $Cfg.Password)
         $ownClient = $true
     }
@@ -1114,8 +1162,14 @@ function Get-LiveTickets {
         foreach ($id in $ids) {
             try {
                 $html   = $client.GetTicketHtml($id)
+                $maxArt = 9999
+                $fetchLim = 9999
+                if ($RecentArticlesOnly -gt 0) {
+                    $maxArt = $RecentArticlesOnly
+                    $fetchLim = [Math]::Max(60, $RecentArticlesOnly * 25)
+                }
                 $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $id -client $client `
-                    -maxArticles 9999 -fetchLimit 9999 -sleepMs 50
+                    -maxArticles $maxArt -fetchLimit $fetchLim -sleepMs 0
                 if ($null -eq $ticket) { continue }
                 if ($RecentArticlesOnly -gt 0 -and $ticket.Articles.Count -gt $RecentArticlesOnly) {
                     $short = [System.Collections.Generic.List[object]]::new()
@@ -1365,7 +1419,7 @@ function Show-VisualizadorRealTime {
     Write-Info "Conectando e buscando chamados ativos..."
     Write-Host ""
 
-    $otrsClient = [OtrsClient]::new($Cfg.BaseURL, 45)
+    $otrsClient = [OtrsClient]::new($Cfg.BaseURL, 8)
     try {
         Ensure-ExportScript $ExportScript
         $otrsClient.Login($Cfg.Username, $Cfg.Password)
@@ -1788,6 +1842,10 @@ function Show-Configuracoes {
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
     if (-not $Cfg.HubBaseURL) { $Cfg.HubBaseURL = 'http://172.16.0.49:3210' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
+    if ($null -eq $Cfg.SleepArticleMs) { $Cfg.SleepArticleMs = 10 }
+    if ($null -eq $Cfg.SleepTicketMs)  { $Cfg.SleepTicketMs  = 25 }
+    $Cfg.SleepArticleMs = [int](Read-Field "Pausa entre notas ao exportar (ms, 0=sem)" $Cfg.SleepArticleMs.ToString())
+    $Cfg.SleepTicketMs  = [int](Read-Field "Pausa entre tickets ao exportar (ms, 0=sem)" $Cfg.SleepTicketMs.ToString())
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
@@ -1840,7 +1898,7 @@ function Show-MainMenu {
         Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
-        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Perfil de busca, cache, pasta de saida, URL do Hub'
+        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub, pausas HTTP (performance)'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
         Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login /api/login e envio para /api/relatorio (sem ocorrencia)'
         Write-Host ""
