@@ -1092,27 +1092,13 @@ function Show-NormalizacaoAlert {
 function Get-LiveTickets {
     param([hashtable]$Cfg)
     $client = [OtrsClient]::new($Cfg.BaseURL, 45)
-    try {
-        $client.Login($Cfg.Username, $Cfg.Password)
-        $ids = $client.GetActiveTicketIDs($Cfg.SearchPath)
-        $list = [System.Collections.Generic.List[object]]::new()
-        foreach ($id in $ids) {
-            try {
-                $html   = $client.GetTicketHtml($id)
-                $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $id -client $client `
-                    -maxArticles 9999 -fetchLimit 9999 -sleepMs 50
-                if ($null -ne $ticket -and $ticket.Articles.Count -gt 4) {
-                    $short = [System.Collections.Generic.List[object]]::new()
-                    for ($i = 0; $i -lt 4; $i++) { $short.Add($ticket.Articles[$i]) }
-                    $ticket = [TicketData]::new($ticket.Numero, $ticket.Estado, $ticket.Criado, $ticket.Cliente, $ticket.Unidade, $short)
-                }
-                $list.Add($ticket)
-            } catch { }
-        }
-        return @($list)
-    } finally {
-        $client.Logout()
+    $client.Login($Cfg.Username, $Cfg.Password)
+    $ids = $client.GetActiveTicketIDs($Cfg.SearchPath)
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($id in $ids) {
+        try { $list.Add((Get-TicketDataFromHtml $client $id $false)) } catch { }
     }
+    return @($list)
 }
 
 # =============================================================================
@@ -1419,6 +1405,12 @@ function Show-VisualizadorMenu {
         '1' { Show-VisualizadorRealTime   $Cfg $ExportScript }
         '2' { Show-VisualizadorCompleto   $Cfg $ExportScript }
     }
+}
+
+# Nome antigo usado em copias do menu; mantido para nao quebrar ficheiros nao atualizados.
+function Show-Visualizador {
+    param([hashtable]$Cfg, [string]$ExportScript)
+    Show-VisualizadorMenu $Cfg $ExportScript
 }
 
 
@@ -1751,7 +1743,7 @@ function Show-MainMenu {
         switch ($choice.Trim()) {
             '1' { Invoke-GerarTxt  $Cfg $ExportScript }
             '2' { Invoke-GerarJson $Cfg $ExportScript }
-            '3' { Show-VisualizadorMenu $Cfg $ExportScript }
+            '3' { Show-Visualizador $Cfg $ExportScript }
             '4' { $Cfg = Show-LoginScreen $Cfg }
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
