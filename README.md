@@ -21,9 +21,11 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
 
 ### Desempenho
 
-- **Exportação (opções 1 e 2):** pausas configuráveis (`SleepArticleMs` / `SleepTicketMs`, padrão **5** e **15** ms). Use **0** se o OTRS aceitar. `Write-Progress` atualiza com menos frequência para reduzir custo de UI. Requisições HTTP em falha usam backoff exponencial mais curto.
+- **Exportação (opções 1 e 2):** pausas configuráveis (`SleepArticleMs` / `SleepTicketMs`, padrão **5** e **15** ms). Use **0** se o OTRS aceitar. `Write-Progress` usa intervalo adaptativo (menos atualizações em listas grandes). Requisições HTTP em falha usam backoff exponencial mais curto.
 - **Widget de cliente:** se **nome do cliente** e **unidade** já aparecem no HTML do TicketZoom, o script **não** chama o AJAX `CustomerInformation` (uma requisição a menos por chamado).
-- **Filtro de notas automáticas:** padrões `AutoNotePatterns` são compilados uma vez em memória (menos CPU por nota).
+- **Corpo do artigo:** no **primeiro** artigo de cada chamado o script tenta `Subaction=Plain` (menos HTML); se a resposta for curta, parecer login ou vazia, passa a usar `HTMLView` para **todos** os artigos daquele chamado. `GetResponseText` usa `response.Content` quando existir (evita copiar o stream inteiro).
+- **Regex compilados:** linhas da tabela de artigos, remoção de tags em `Remove-Html` e extração de `<body>` reutilizam instâncias `[regex]` com opção `Compiled`.
+- **Filtro de notas automáticas:** padrões `AutoNotePatterns` também são compilados uma vez (`Test-AutoNote`).
 - **Leitura de notas:** respeita `MaxArticles` / `FetchLimit`; no menu permanecem em **9999** (relatório completo), exceto no visualizador tempo real com limite de 4 notas.
 - **Visualizador tempo real (4 notas):** busca só o necessário (ordena por data, para cedo), sem pausa entre notas.
 - **Sessão OTRS no visualizador:** um único login até sair com `[Q]`.

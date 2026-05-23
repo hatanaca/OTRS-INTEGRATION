@@ -316,10 +316,14 @@ class OtrsClient {
         return ''
     }
 
-    [string] GetArticleContent([string]$ticketID, [string]$articleID) {
-        $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketArticleContent;Subaction=HTMLView;TicketID=$ticketID;ArticleID=$articleID;FileID=;"
+    [string] GetArticleRaw([string]$ticketID, [string]$articleID, [string]$subaction) {
+        $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketArticleContent;Subaction=$subaction;TicketID=$ticketID;ArticleID=$articleID;FileID=;"
         $response = $this.InvokeWithRetry($uri)
         return $this.GetResponseText($response)
+    }
+
+    [string] GetArticleContent([string]$ticketID, [string]$articleID) {
+        return $this.GetArticleRaw($ticketID, $articleID, 'HTMLView')
     }
 
     hidden [object] InvokeWithRetry([string]$uri) {
@@ -355,7 +359,11 @@ class OtrsClient {
     }
 
     hidden [string] GetResponseText($response) {
-        if (-not $response -or -not $response.RawContentStream) { return '' }
+        if (-not $response) { return '' }
+        # Preferir Content (string ja materializada) — mais rapido que ler RawContentStream inteiro.
+        $c = $response.Content
+        if ($null -ne $c -and $c.Length -gt 0) { return [string]$c }
+        if (-not $response.RawContentStream) { return '' }
         return [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
     }
 }
@@ -433,18 +441,51 @@ class TicketCache {
 # =============================================================================
 # Funcoes de extracao
 # =============================================================================
+
+function Ensure-ZnunyParserRegexes {
+    if ($script:_ZnunyRxReady) { return }
+    $ro = [System.Text.RegularExpressions.RegexOptions]::Compiled -bor
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $roIc = $ro -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    $script:_RxTrArticleRows = [regex]::new('(?s)<tr[^>]*id="Row\d+"[^>]*>(.*?)</tr>', $ro)
+    $script:_RxArtIdInRow = [regex]::new('<input[^>]+class="ArticleID"[^>]+value="(\d+)"', $roIc)
+    $script:_RxArtDateInRow = [regex]::new('<td class="Created">[^<]*<div title="([^"]+)"', $ro)
+    $script:_RxArtBody = [regex]::new('(?s)<body[^>]*>(.*)</body>', $roIc)
+    $script:_RxStripStyle = [regex]::new('(?s)<style[^>]*>.*?</style>', $ro)
+    $script:_RxStripScript = [regex]::new('(?s)<script[^>]*>.*?</script>', $ro)
+    $script:_RxStripTags = [regex]::new('<[^>]+>', $ro)
+    $script:_RxStripWs = [regex]::new('\s+', $ro)
+    $script:_ZnunyRxReady = $true
+}
+
+function Get-ArticleBodyChunk {
+    param([string]$Raw)
+    if (-not $Raw) { return '' }
+    Ensure-ZnunyParserRegexes
+    if (($m = $script:_RxArtBody.Match($Raw)).Success) { return $m.Groups[1].Value.Trim() }
+    if ($Raw -notmatch '<[a-zA-Z!/]') { return $Raw.Trim() }
+    return ''
+}
+
+function Test-ArticleRawLooksLikeLoginPage {
+    param([string]$Raw)
+    if (-not $Raw) { return $true }
+    return $Raw -match 'Action=Login|name\s*=\s*"Password"|Login de Agente'
+}
+
 function Remove-Html {
     param([string]$Text)
     if (-not $Text) { return '' }
+    Ensure-ZnunyParserRegexes
     try {
-        $Text = $Text -replace '(?s)<style[^>]*>.*?</style>', ''
-        $Text = $Text -replace '(?s)<script[^>]*>.*?</script>', ''
-        $Text = $Text -replace '<[^>]+>', ''
+        $Text = $script:_RxStripStyle.Replace($Text, '')
+        $Text = $script:_RxStripScript.Replace($Text, '')
+        $Text = $script:_RxStripTags.Replace($Text, '')
         $Text = [System.Net.WebUtility]::HtmlDecode($Text)
     } catch {
         Write-Warning "Erro ao decodificar HTML: $_"
     }
-    return ($Text -replace '\s+', ' ').Trim()
+    return $script:_RxStripWs.Replace($Text, ' ').Trim()
 }
 
 function Get-CustomerNameFromHtml {
@@ -672,19 +713,19 @@ function Get-TicketDataFromHtml {
     }
 
     $articles = [System.Collections.Generic.List[object]]::new()
-    $rowPattern = @'
-(?s)<tr[^>]*id="Row\d+"[^>]*>(.*?)</tr>
-'@
-    $rowMatches = [regex]::Matches($HTML, $rowPattern)
+    Ensure-ZnunyParserRegexes
+    $rowMatches = $script:_RxTrArticleRows.Matches($HTML)
 
     # Linhas de artigo (sem baixar corpo ainda). Em modo limitado (ex.: 4 notas no live),
     # ordena por data decrescente para buscar primeiro as mais recentes e parar cedo.
     $rowList = [System.Collections.Generic.List[object]]::new()
     foreach ($row in $rowMatches) {
         $rowHtml = $row.Groups[1].Value
-        if (($m = [regex]::Match($rowHtml, '<input[^>]+class="ArticleID"[^>]+value="(\d+)"')).Success) { $aid = $m.Groups[1].Value } else { $aid = $null }
-        if (($m = [regex]::Match($rowHtml, '<td class="Created">[^<]*<div title="([^"]+)"')).Success) { $adate = $m.Groups[1].Value } else { $adate = 'N/D' }
-        if (-not $aid) { continue }
+        $mAid = $script:_RxArtIdInRow.Match($rowHtml)
+        if (-not $mAid.Success) { continue }
+        $aid = $mAid.Groups[1].Value
+        $mDt = $script:_RxArtDateInRow.Match($rowHtml)
+        if ($mDt.Success) { $adate = $mDt.Groups[1].Value } else { $adate = 'N/D' }
         $sortKey = [datetime]::MinValue
         if ($adate -match '^(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})') {
             try {
@@ -706,19 +747,40 @@ function Get-TicketDataFromHtml {
         foreach ($x in ($rowList | Sort-Object { $_.SortKey } -Descending)) { $walk.Add($x) }
     }
 
+    $articlePlainPreferred = $null
     foreach ($item in $walk) {
         if (-not $unlimitedArticles -and $articles.Count -ge $maxArticles) { break }
         if (-not $unlimitedFetch -and $fetchCount -ge $fetchLimit) { break }
 
-        $rowHtml = $item.Row
-        $aid     = $item.Aid
-        $adate   = $item.Adate
+        $aid   = $item.Aid
+        $adate = $item.Adate
         try {
-            $raw = $client.GetArticleContent($ticketID, $aid)
-            $fetchCount++
-            $raw = $raw -replace '(?s)<style[^>]*>.*?</style>', ''
-            $raw = $raw -replace '(?s)<script[^>]*>.*?</script>', ''
-            if (($m = [regex]::Match($raw, '(?s)<body[^>]*>(.*)</body>')).Success) { $body = $m.Groups[1].Value.Trim() } else { $body = '' }
+            if ($null -eq $articlePlainPreferred) {
+                $httpThis = 0
+                $rawTry = $null
+                try {
+                    $rawTry = $client.GetArticleRaw($ticketID, $aid, 'Plain')
+                    $httpThis++
+                } catch { }
+                $probeChunk = Get-ArticleBodyChunk $rawTry
+                if ($probeChunk.Length -ge 5 -and -not (Test-ArticleRawLooksLikeLoginPage $rawTry)) {
+                    $articlePlainPreferred = $true
+                    $raw = $rawTry
+                } else {
+                    $articlePlainPreferred = $false
+                    $raw = $client.GetArticleRaw($ticketID, $aid, 'HTMLView')
+                    $httpThis++
+                }
+                $fetchCount += $httpThis
+            } elseif ($articlePlainPreferred) {
+                $raw = $client.GetArticleRaw($ticketID, $aid, 'Plain')
+                $fetchCount++
+            } else {
+                $raw = $client.GetArticleRaw($ticketID, $aid, 'HTMLView')
+                $fetchCount++
+            }
+
+            $body = Get-ArticleBodyChunk $raw
             if (-not $body) { continue }
             $text = Remove-Html $body
 
@@ -877,9 +939,10 @@ function Export-CcoReport {
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $progN = 0
+    $progStep = if ($allIds.Count -gt 120) { 15 } elseif ($allIds.Count -gt 60) { 10 } elseif ($allIds.Count -gt 25) { 7 } else { 5 }
     foreach ($tid in $allIds) {
         $progN++
-        if (($progN % 5) -eq 0 -or $progN -eq 1) {
+        if (($progN % $progStep) -eq 0 -or $progN -eq 1) {
             $pct = [int]([Math]::Min(100, $progN * 100 / [Math]::Max(1, $allIds.Count)))
             Write-Progress -Activity "Processando tickets" -Status "Ticket $tid ($progN/$($allIds.Count))" -PercentComplete $pct
         }
