@@ -1097,11 +1097,18 @@ function Get-LiveTickets {
         [hashtable]$Cfg,
         # Se > 0, mantem apenas as N notas mais recentes (apos ordenacao cronologica no TicketData).
         # Se 0, retorna todas as notas obtidas do OTRS.
-        [int]$RecentArticlesOnly = 4
+        [int]$RecentArticlesOnly = 4,
+        # Quando informado, reutiliza a sessao ja autenticada (evita login/logout a cada refresh).
+        [OtrsClient]$SessionClient = $null
     )
-    $client = [OtrsClient]::new($Cfg.BaseURL, 45)
-    try {
+    $ownClient = $false
+    $client = $SessionClient
+    if ($null -eq $client) {
+        $client = [OtrsClient]::new($Cfg.BaseURL, 45)
         $client.Login($Cfg.Username, $Cfg.Password)
+        $ownClient = $true
+    }
+    try {
         $ids = $client.GetActiveTicketIDs($Cfg.SearchPath)
         $list = [System.Collections.Generic.List[object]]::new()
         foreach ($id in $ids) {
@@ -1123,7 +1130,7 @@ function Get-LiveTickets {
         }
         return @($list)
     } finally {
-        $client.Logout()
+        if ($ownClient) { $client.Logout() }
     }
 }
 
@@ -1354,18 +1361,25 @@ function Show-VisualizadorRealTime {
     if ($TodasNotas) {
         Write-Warn "Modo completo: cada atualizacao baixa todas as notas (pode ser lento)."
     }
+    Write-Info "Sessao unica no OTRS: um login ao entrar e logout ao sair com [Q] (menos avisos de excesso de logins)."
     Write-Info "Conectando e buscando chamados ativos..."
     Write-Host ""
 
+    $otrsClient = [OtrsClient]::new($Cfg.BaseURL, 45)
     try {
         Ensure-ExportScript $ExportScript
-        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
+        $otrsClient.Login($Cfg.Username, $Cfg.Password)
+        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
     } catch {
-        Write-Err ("Falha ao buscar: " + $_); Pause-Screen; return
+        Write-Err ("Falha ao buscar: " + $_)
+        try { $otrsClient.Logout() } catch {}
+        Pause-Screen; return
     }
 
     if ($tickets.Count -eq 0) {
-        Write-Warn "Nenhum chamado ativo encontrado."; Pause-Screen; return
+        Write-Warn "Nenhum chamado ativo encontrado."
+        try { $otrsClient.Logout() } catch {}
+        Pause-Screen; return
     }
 
     $null = Update-Normalizados $tickets
@@ -1373,53 +1387,83 @@ function Show-VisualizadorRealTime {
     $idx         = 0
     $lastRefresh = [DateTime]::Now
 
-    while ($true) {
-        $secsLeft = $REFRESH_SEC - [int]([DateTime]::Now - $lastRefresh).TotalSeconds
-        if ($secsLeft -lt 0) { $secsLeft = 0 }
+    try {
+        while ($true) {
+            $secsLeft = $REFRESH_SEC - [int]([DateTime]::Now - $lastRefresh).TotalSeconds
+            if ($secsLeft -lt 0) { $secsLeft = 0 }
 
-        Show-TicketCard $tickets[$idx] $idx $tickets.Count 0 $cardMaxNotes $secsLeft
+            Show-TicketCard $tickets[$idx] $idx $tickets.Count 0 $cardMaxNotes $secsLeft
 
-        # Espera ate 500ms por tecla
-        $waited = 0 ; $keyFound = $false
-        while ($waited -lt 500) {
-            if ($Host.UI.RawUI.KeyAvailable) { $keyFound = $true; break }
-            Start-Sleep -Milliseconds 100
-            $waited += 100
+            # Espera ate 500ms por tecla
+            $waited = 0 ; $keyFound = $false
+            while ($waited -lt 500) {
+                if ($Host.UI.RawUI.KeyAvailable) { $keyFound = $true; break }
+                Start-Sleep -Milliseconds 100
+                $waited += 100
+            }
+
+            # Verifica se chegou hora do refresh automatico
+            $elapsed = ([DateTime]::Now - $lastRefresh).TotalSeconds
+            if (-not $keyFound -and $elapsed -ge $REFRESH_SEC) {
+                try {
+                    $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                    $norm = Update-Normalizados $newT
+                    $tickets = $newT
+                    if ($idx -ge $tickets.Count) { $idx = 0 }
+                    $lastRefresh = [DateTime]::Now
+                    if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                } catch {
+                    try {
+                        Write-Warn ("Atualizacao automatica falhou; tentando novo login: " + $_)
+                        $otrsClient.Login($Cfg.Username, $Cfg.Password)
+                        $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                        $norm = Update-Normalizados $newT
+                        $tickets = $newT
+                        if ($idx -ge $tickets.Count) { $idx = 0 }
+                        $lastRefresh = [DateTime]::Now
+                        if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                    } catch {
+                        Write-Warn ("Ainda falhou: " + $_)
+                    }
+                }
+                continue
+            }
+
+            if (-not $keyFound) { continue }
+
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            $vk  = [int]$key.VirtualKeyCode
+            $ch  = [string]$key.Character
+
+            if     ($vk -eq 39 -or $vk -eq 34) { if ($idx -lt ($tickets.Count-1)) { $idx++ } else { $idx=0 } }
+            elseif ($vk -eq 37 -or $vk -eq 33) { if ($idx -gt 0) { $idx-- } else { $idx=$tickets.Count-1 } }
+            elseif ($ch -eq 'r' -or $ch -eq 'R') {
+                try {
+                    $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                    $norm = Update-Normalizados $newT
+                    $tickets = $newT
+                    if ($idx -ge $tickets.Count) { $idx = 0 }
+                    $lastRefresh = [DateTime]::Now
+                    if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                } catch {
+                    try {
+                        Write-Warn ("Refresh manual falhou; tentando novo login: " + $_)
+                        $otrsClient.Login($Cfg.Username, $Cfg.Password)
+                        $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                        $norm = Update-Normalizados $newT
+                        $tickets = $newT
+                        if ($idx -ge $tickets.Count) { $idx = 0 }
+                        $lastRefresh = [DateTime]::Now
+                        if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                    } catch {
+                        Write-Warn ("Ainda falhou: " + $_)
+                    }
+                }
+            }
+            elseif ($ch -eq 'q' -or $ch -eq 'Q' -or $vk -eq 27) { [Console]::Clear(); return }
         }
-
-        # Verifica se chegou hora do refresh automatico
-        $elapsed = ([DateTime]::Now - $lastRefresh).TotalSeconds
-        if (-not $keyFound -and $elapsed -ge $REFRESH_SEC) {
-            try {
-                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
-                $norm = Update-Normalizados $newT
-                $tickets = $newT
-                if ($idx -ge $tickets.Count) { $idx = 0 }
-                $lastRefresh = [DateTime]::Now
-                if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
-            } catch { }
-            continue
-        }
-
-        if (-not $keyFound) { continue }
-
-        $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        $vk  = [int]$key.VirtualKeyCode
-        $ch  = [string]$key.Character
-
-        if     ($vk -eq 39 -or $vk -eq 34) { if ($idx -lt ($tickets.Count-1)) { $idx++ } else { $idx=0 } }
-        elseif ($vk -eq 37 -or $vk -eq 33) { if ($idx -gt 0) { $idx-- } else { $idx=$tickets.Count-1 } }
-        elseif ($ch -eq 'r' -or $ch -eq 'R') {
-            try {
-                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
-                $norm = Update-Normalizados $newT
-                $tickets = $newT
-                if ($idx -ge $tickets.Count) { $idx = 0 }
-                $lastRefresh = [DateTime]::Now
-                if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
-            } catch { }
-        }
-        elseif ($ch -eq 'q' -or $ch -eq 'Q' -or $vk -eq 27) { [Console]::Clear(); return }
+    } finally {
+        try { $otrsClient.Logout() } catch {}
     }
 }
 
@@ -1430,8 +1474,8 @@ function Show-VisualizadorMenu {
     Write-Banner
     Write-Centered "-- VISUALIZAR CHAMADOS --" 'White'
     Write-Host ""
-    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    'Atualiza a cada 60s; apenas as 4 notas mais recentes por chamado'
-    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    'Atualiza a cada 60s; todas as notas de cada chamado ativo (mais lento)'
+    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    'Sessao unica; atualiza a cada 60s; 4 notas mais recentes por chamado'
+    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    'Sessao unica; atualiza a cada 60s; todas as notas (mais lento)'
     Write-MenuOpt '3' 'Cache local (offline)     ' 'Yellow'   'Ultimo relatorio salvo em JSON; todas as notas, sem consultar OTRS'
     Write-MenuOpt '0' 'Voltar                    ' 'DarkGray' ''
     Write-Host ""

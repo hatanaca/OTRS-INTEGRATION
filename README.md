@@ -25,6 +25,8 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
    - **OTRS tempo real (4 notas)** — Atualização a cada 60 s; apenas as **quatro notas mais recentes** por chamado (consulta direta ao OTRS).
    - **OTRS tempo real (todas)** — Mesmo fluxo em tempo real, porém com **todas as notas** de cada chamado ativo (mais lento).
    - **Cache local** — Último JSON gerado, sem consultar o OTRS; rolagem livre das notas.
+
+Nos dois modos **OTRS em tempo real**, o script usa **uma única sessão**: faz **login uma vez** ao abrir o visualizador, reutiliza os cookies em cada atualização (automática a cada 60 s ou tecla `[R]`) e só faz **logout** ao sair com `[Q]`, reduzindo avisos de excesso de logins no Znuny/OTRS. Se a sessão expirar, há **uma tentativa de novo login** antes de desistir daquela atualização.
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
