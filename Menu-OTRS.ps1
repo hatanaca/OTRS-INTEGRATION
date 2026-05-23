@@ -103,22 +103,24 @@ function Pause-Screen {
 function Load-Config {
     param([string]$Path)
     $cfg = @{
-        BaseURL    = 'http://172.16.0.12/znuny'
-        Username   = ''
-        Password   = ''
-        EstadoFile = 'estado_chamados.json'
-        OutputPath = $PWD.Path
-        SearchPath = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
+        BaseURL     = 'http://172.16.0.12/znuny'
+        Username    = ''
+        Password    = ''
+        EstadoFile  = 'estado_chamados.json'
+        OutputPath  = $PWD.Path
+        SearchPath  = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
+        HubBaseURL  = 'http://172.16.0.49:3210'
     }
     if (Test-Path $Path) {
         try {
             $j = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($j.BaseURL)    { $cfg.BaseURL    = $j.BaseURL    }
-            if ($j.Username)   { $cfg.Username   = $j.Username   }
-            if ($j.Password)   { $cfg.Password   = $j.Password   }
-            if ($j.EstadoFile) { $cfg.EstadoFile = $j.EstadoFile }
-            if ($j.OutputPath) { $cfg.OutputPath = $j.OutputPath }
-            if ($j.SearchPath) { $cfg.SearchPath = $j.SearchPath }
+            if ($j.BaseURL)     { $cfg.BaseURL     = $j.BaseURL     }
+            if ($j.Username)    { $cfg.Username    = $j.Username    }
+            if ($j.Password)    { $cfg.Password    = $j.Password    }
+            if ($j.EstadoFile)  { $cfg.EstadoFile  = $j.EstadoFile  }
+            if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
+            if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
+            if ($j.HubBaseURL)  { $cfg.HubBaseURL  = $j.HubBaseURL  }
         } catch { }
     }
     return $cfg
@@ -127,12 +129,13 @@ function Load-Config {
 function Save-Config {
     param([hashtable]$Cfg, [string]$Path)
     [ordered]@{
-        BaseURL    = $Cfg.BaseURL
-        Username   = $Cfg.Username
-        Password   = $Cfg.Password
-        EstadoFile = $Cfg.EstadoFile
-        OutputPath = $Cfg.OutputPath
-        SearchPath = $Cfg.SearchPath
+        BaseURL     = $Cfg.BaseURL
+        Username    = $Cfg.Username
+        Password    = $Cfg.Password
+        EstadoFile  = $Cfg.EstadoFile
+        OutputPath  = $Cfg.OutputPath
+        SearchPath  = $Cfg.SearchPath
+        HubBaseURL  = $Cfg.HubBaseURL
     } | ConvertTo-Json | Out-File $Path -Encoding UTF8
 }
 
@@ -1090,7 +1093,12 @@ function Show-NormalizacaoAlert {
 }
 
 function Get-LiveTickets {
-    param([hashtable]$Cfg)
+    param(
+        [hashtable]$Cfg,
+        # Se > 0, mantem apenas as N notas mais recentes (apos ordenacao cronologica no TicketData).
+        # Se 0, retorna todas as notas obtidas do OTRS.
+        [int]$RecentArticlesOnly = 4
+    )
     $client = [OtrsClient]::new($Cfg.BaseURL, 45)
     try {
         $client.Login($Cfg.Username, $Cfg.Password)
@@ -1101,9 +1109,13 @@ function Get-LiveTickets {
                 $html   = $client.GetTicketHtml($id)
                 $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $id -client $client `
                     -maxArticles 9999 -fetchLimit 9999 -sleepMs 50
-                if ($null -ne $ticket -and $ticket.Articles.Count -gt 4) {
+                if ($null -eq $ticket) { continue }
+                if ($RecentArticlesOnly -gt 0 -and $ticket.Articles.Count -gt $RecentArticlesOnly) {
                     $short = [System.Collections.Generic.List[object]]::new()
-                    for ($i = 0; $i -lt 4; $i++) { $short.Add($ticket.Articles[$i]) }
+                    $start = $ticket.Articles.Count - $RecentArticlesOnly
+                    for ($i = $start; $i -lt $ticket.Articles.Count; $i++) {
+                        $short.Add($ticket.Articles[$i])
+                    }
                     $ticket = [TicketData]::new($ticket.Numero, $ticket.Estado, $ticket.Criado, $ticket.Cliente, $ticket.Unidade, $short)
                 }
                 $list.Add($ticket)
@@ -1320,23 +1332,34 @@ function Show-VisualizadorCompleto {
     }
 }
 
-# Modo tempo real: busca do OTRS a cada 60s, 4 ultimas notas
+# Modo tempo real: busca do OTRS a cada 60s.
+# -TodasNotas: todas as notas de cada chamado (MaxNotes 0 = rolagem por altura).
+# Caso contrario: apenas as 4 notas mais recentes por chamado.
 function Show-VisualizadorRealTime {
-    param([hashtable]$Cfg, [string]$ExportScript)
+    param([hashtable]$Cfg, [string]$ExportScript, [switch]$TodasNotas)
 
     $REFRESH_SEC = 60
+    $recentParam = if ($TodasNotas) { 0 } else { 4 }
+    $cardMaxNotes = if ($TodasNotas) { 0 } else { 4 }
 
     Write-Banner
-    Write-Centered "-- BUSCANDO DO OTRS (TEMPO REAL) --" 'White'
+    if ($TodasNotas) {
+        Write-Centered "-- OTRS TEMPO REAL (TODAS AS NOTAS) --" 'White'
+    } else {
+        Write-Centered "-- OTRS TEMPO REAL (4 ULTIMAS NOTAS) --" 'White'
+    }
     Write-Host ""
     Write-Info ("Servidor: " + $Cfg.BaseURL)
     Write-Info ("Usuario : " + $Cfg.Username)
+    if ($TodasNotas) {
+        Write-Warn "Modo completo: cada atualizacao baixa todas as notas (pode ser lento)."
+    }
     Write-Info "Conectando e buscando chamados ativos..."
     Write-Host ""
 
     try {
         Ensure-ExportScript $ExportScript
-        $tickets = Get-LiveTickets $Cfg
+        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
     } catch {
         Write-Err ("Falha ao buscar: " + $_); Pause-Screen; return
     }
@@ -1354,7 +1377,7 @@ function Show-VisualizadorRealTime {
         $secsLeft = $REFRESH_SEC - [int]([DateTime]::Now - $lastRefresh).TotalSeconds
         if ($secsLeft -lt 0) { $secsLeft = 0 }
 
-        Show-TicketCard $tickets[$idx] $idx $tickets.Count 0 4 $secsLeft
+        Show-TicketCard $tickets[$idx] $idx $tickets.Count 0 $cardMaxNotes $secsLeft
 
         # Espera ate 500ms por tecla
         $waited = 0 ; $keyFound = $false
@@ -1368,7 +1391,7 @@ function Show-VisualizadorRealTime {
         $elapsed = ([DateTime]::Now - $lastRefresh).TotalSeconds
         if (-not $keyFound -and $elapsed -ge $REFRESH_SEC) {
             try {
-                $newT = Get-LiveTickets $Cfg
+                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
                 $norm = Update-Normalizados $newT
                 $tickets = $newT
                 if ($idx -ge $tickets.Count) { $idx = 0 }
@@ -1388,7 +1411,7 @@ function Show-VisualizadorRealTime {
         elseif ($vk -eq 37 -or $vk -eq 33) { if ($idx -gt 0) { $idx-- } else { $idx=$tickets.Count-1 } }
         elseif ($ch -eq 'r' -or $ch -eq 'R') {
             try {
-                $newT = Get-LiveTickets $Cfg
+                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
                 $norm = Update-Normalizados $newT
                 $tickets = $newT
                 if ($idx -ge $tickets.Count) { $idx = 0 }
@@ -1407,9 +1430,12 @@ function Show-VisualizadorMenu {
     Write-Banner
     Write-Centered "-- VISUALIZAR CHAMADOS --" 'White'
     Write-Host ""
-    Write-MenuOpt '1' 'Tempo Real   ' 'White'    'Busca do OTRS a cada 60s, ultimas 4 notas por chamado'
-    Write-MenuOpt '2' 'Completo     ' 'White'    'Leitura do cache, todas as notas, scroll livre'
-    Write-MenuOpt '0' 'Voltar       ' 'DarkGray' ''
+    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    'Atualiza a cada 60s; apenas as 4 notas mais recentes por chamado'
+    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    'Atualiza a cada 60s; todas as notas de cada chamado ativo (mais lento)'
+    Write-MenuOpt '3' 'Cache local (offline)     ' 'Yellow'   'Ultimo relatorio salvo em JSON; todas as notas, sem consultar OTRS'
+    Write-MenuOpt '0' 'Voltar                    ' 'DarkGray' ''
+    Write-Host ""
+    Write-Info "Em qualquer modo OTRS: alerta em tela cheia se um chamado passar a estado normalizado."
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
@@ -1417,7 +1443,8 @@ function Show-VisualizadorMenu {
     $ch = (Read-Host).Trim()
     switch ($ch) {
         '1' { Show-VisualizadorRealTime   $Cfg $ExportScript }
-        '2' { Show-VisualizadorCompleto   $Cfg $ExportScript }
+        '2' { Show-VisualizadorRealTime   $Cfg $ExportScript -TodasNotas }
+        '3' { Show-VisualizadorCompleto   $Cfg $ExportScript }
     }
 }
 
@@ -1429,9 +1456,10 @@ $script:HubSession = $null
 
 function Hub-Login {
     param([string]$HubUrl, [string]$Email, [string]$Pass)
-    $body = '{"email":"' + $Email + '","password":"' + $Pass + '"}'
-    $resp = Invoke-WebRequest -Uri ($HubUrl + "/api/login") `
-        -Method POST -ContentType "application/json" -Body $body `
+    $base = $HubUrl.TrimEnd('/')
+    $loginBody = (@{ email = $Email; password = $Pass } | ConvertTo-Json -Compress)
+    $resp = Invoke-WebRequest -Uri ($base + "/api/login") `
+        -Method POST -ContentType "application/json; charset=utf-8" -Body $loginBody `
         -SessionVariable 'WebSess' -UseBasicParsing
     $script:HubSession = $WebSess
     return $resp.Content | ConvertFrom-Json
@@ -1439,15 +1467,17 @@ function Hub-Login {
 
 function Hub-Get {
     param([string]$HubUrl, [string]$Path)
-    $resp = Invoke-WebRequest -Uri ($HubUrl + $Path) `
+    $base = $HubUrl.TrimEnd('/')
+    $resp = Invoke-WebRequest -Uri ($base + $Path) `
         -Method GET -WebSession $script:HubSession -UseBasicParsing
     return $resp.Content | ConvertFrom-Json
 }
 
 function Hub-Post {
     param([string]$HubUrl, [string]$Path, $Body)
+    $base = $HubUrl.TrimEnd('/')
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($HubUrl + $Path) `
+    $resp = Invoke-WebRequest -Uri ($base + $Path) `
         -Method POST -ContentType "application/json" -Body $json `
         -WebSession $script:HubSession -UseBasicParsing
     return $resp.Content | ConvertFrom-Json
@@ -1455,8 +1485,9 @@ function Hub-Post {
 
 function Hub-Put {
     param([string]$HubUrl, [string]$Path, $Body)
+    $base = $HubUrl.TrimEnd('/')
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($HubUrl + $Path) `
+    $resp = Invoke-WebRequest -Uri ($base + $Path) `
         -Method PUT -ContentType "application/json" -Body $json `
         -WebSession $script:HubSession -UseBasicParsing
     return $resp.Content | ConvertFrom-Json
@@ -1484,6 +1515,8 @@ function Build-HubTicket {
         $updates.Add([ordered]@{ date=$uDate; hour=$uHour; text=$n.Text })
     }
 
+    # Campos alinhados ao formulario do Hub (relatorio CCO). O campo "ocorrencia" nao e enviado
+    # para o operador preencher manualmente no navegador.
     return [ordered]@{
         number      = $Ticket.Numero
         status      = $Ticket.Estado
@@ -1492,6 +1525,24 @@ function Build-HubTicket {
         client      = $Ticket.Cliente
         updates     = @($updates)
     }
+}
+
+function Test-HubRelatorioChanged {
+    param($hubTicket, $payload)
+    if (-not $hubTicket) { return $true }
+    if (($hubTicket.status -or '') -ne ($payload.status -or '')) { return $true }
+    if (($hubTicket.openingDate -or '') -ne ($payload.openingDate -or '')) { return $true }
+    if (($hubTicket.openingHour -or '') -ne ($payload.openingHour -or '')) { return $true }
+    if (($hubTicket.client -or '') -ne ($payload.client -or '')) { return $true }
+    $hu = @($hubTicket.updates)
+    $pu = @($payload.updates)
+    if ($hu.Count -ne $pu.Count) { return $true }
+    for ($i = 0; $i -lt $hu.Count; $i++) {
+        if (($hu[$i].text -or '') -ne ($pu[$i].text -or '')) { return $true }
+        if (($hu[$i].date -or '') -ne ($pu[$i].date -or '')) { return $true }
+        if (($hu[$i].hour -or '') -ne ($pu[$i].hour -or '')) { return $true }
+    }
+    return $false
 }
 
 function Show-HubTicketPreview {
@@ -1514,12 +1565,16 @@ function Invoke-SyncHub {
     Write-Banner
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
+    Write-Info "O campo Ocorrencia do Hub nao e alterado por esta sincronizacao (preenchimento manual)."
+    Write-Host ""
 
     # Credenciais do Hub
-    $hubUrl   = Read-Field "URL do Hub" "http://172.16.0.49:3210"
+    $hubDefault = if ($Cfg.HubBaseURL) { $Cfg.HubBaseURL } else { 'http://172.16.0.49:3210' }
+    $hubUrl   = Read-Field "URL do Hub" $hubDefault
     $hubEmail = Read-Field "Email Hub"  ""
     Write-Host "  Senha Hub: " -ForegroundColor Yellow -NoNewline
     $hubPass = Read-Host
+    $hubUrl = $hubUrl.TrimEnd('/')
     Write-Host ""
 
     # Login
@@ -1536,9 +1591,13 @@ function Invoke-SyncHub {
     $existingMap = @{}
     try {
         $hubTickets = Hub-Get $hubUrl "/api/relatorio"
-        if ($hubTickets -is [array]) {
-            foreach ($ht in $hubTickets) {
-                if ($ht.number) { $existingMap[$ht.number.ToString()] = $ht }
+        if ($null -ne $hubTickets) {
+            if ($hubTickets -is [System.Array]) {
+                foreach ($ht in $hubTickets) {
+                    if ($ht.number) { $existingMap[$ht.number.ToString()] = $ht }
+                }
+            } elseif ($hubTickets.number) {
+                $existingMap[$hubTickets.number.ToString()] = $hubTickets
             }
         }
         Write-OK ($existingMap.Count.ToString() + " tickets encontrados no Hub.")
@@ -1575,16 +1634,13 @@ function Invoke-SyncHub {
         $payload = Build-HubTicket $ticket
 
         if ($existingMap.ContainsKey($num)) {
-            # Ticket ja existe - verifica se ha novas notas
+            # Ticket ja existe - compara estado, cliente, abertura e todas as atualizacoes
             $hub = $existingMap[$num]
-            if ($hub.updates) { $hubNoteCount = $hub.updates.Count } else { $hubNoteCount = 0 }
-            $newNoteCount = $payload.updates.Count
-
-            if ($newNoteCount -gt $hubNoteCount) {
+            if (Test-HubRelatorioChanged $hub $payload) {
                 Write-Host ""
-                Write-Host ("  [UPD] #" + $num + " - " + ($newNoteCount - $hubNoteCount) + " novas notas") -ForegroundColor Cyan
+                Write-Host ("  [UPD] #" + $num + " - diferenca em relacao ao Hub (estado, cliente, datas ou notas)") -ForegroundColor Cyan
                 Show-HubTicketPreview $payload
-                Write-Host "  Atualizar? [S/n]: " -ForegroundColor Yellow -NoNewline
+                Write-Host "  Atualizar registro no Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
                 $r = Read-Host
                 if ($r -eq '' -or $r -match '^[Ss]') {
                     try {
@@ -1686,6 +1742,8 @@ function Show-Configuracoes {
     $Cfg.SearchPath = Read-Field "Perfil de busca (SearchPath)" $Cfg.SearchPath
     $Cfg.EstadoFile = Read-Field "Arquivo de cache (JSON)"      $Cfg.EstadoFile
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
+    if (-not $Cfg.HubBaseURL) { $Cfg.HubBaseURL = 'http://172.16.0.49:3210' }
+    $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
@@ -1735,11 +1793,12 @@ function Show-MainMenu {
 
         Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'Cria arquivo .txt no formato CCO'
         Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Cria arquivo .json com todos os dados'
-        Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'Navega pelos chamados no terminal (<- ->)'
+        Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
-        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Perfil de busca, cache, pasta de saida'
+        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Perfil de busca, cache, pasta de saida, URL do Hub'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login /api/login e envio para /api/relatorio (sem ocorrencia)'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
@@ -1751,10 +1810,11 @@ function Show-MainMenu {
         switch ($choice.Trim()) {
             '1' { Invoke-GerarTxt  $Cfg $ExportScript }
             '2' { Invoke-GerarJson $Cfg $ExportScript }
-            '3' { Show-Visualizador $Cfg $ExportScript }
+            '3' { Show-VisualizadorMenu $Cfg $ExportScript }
             '4' { $Cfg = Show-LoginScreen $Cfg }
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
+            '7' { Invoke-SyncHub $Cfg $ExportScript }
             '0' {
                 Write-Banner
                 Write-Centered "Ate logo!" 'DarkCyan'
