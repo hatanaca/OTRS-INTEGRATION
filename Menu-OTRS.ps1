@@ -479,7 +479,6 @@ function Ensure-ZnunyParserRegexes {
     $script:_RxFootEscreveu = [regex]::new('\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s*-\s*\S+@\S+\s+escreveu:.*$', $ro)
     $script:_RxFootEmBlock = [regex]::new('\s*Em\s+\d{2}/\d{2}/\d{4}.*?escreveu:.*$', $ro)
     $script:_RxUnidadeAltUsuario = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
-    $script:_RxUnidadeAltCodCliente = [regex]::new('(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
     $tokList = [System.Collections.Generic.List[regex]]::new()
     foreach ($tp in @(
             'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
@@ -501,14 +500,19 @@ function Ensure-ZnunyParserRegexes {
     $script:_RxCustIdCliA = [regex]::new('(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<a[^>]*>([^<]+)</a>', $roIc)
     $script:_RxCustClienteTitle = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
     $script:_RxCustClienteP = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
-    $script:_RxUnitCodClienteP = [regex]::new('(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
     $script:_RxUnitUsuarioP = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
-    $script:_RxUnitNomeSuffix3 = [regex]::new('-\s*(\d{3,})\s*$', $ro)
     $script:_RxUnitNomeSuffixGen = [regex]::new('-\s*([^\s-][^-]*)\s*$', $ro)
     $script:_RxHtmlTagProbe = [regex]::new('<[a-zA-Z!/]', $ro)
     $dynT = [System.Collections.Generic.List[regex]]::new()
     $dynP = [System.Collections.Generic.List[regex]]::new()
-    foreach ($lb in @('Unidade', 'Loja', 'C\s*o\s*d\s*i\s*g\s*o\s*Cliente', 'Custom\s?[Uu]ser', 'Customer\s?[Uu]ser')) {
+    foreach ($lb in @(
+            'Unidade',
+            'Loja',
+            'Filial',
+            'Campo\s*do\s*[Cc]liente',
+            'Custom\s?[Uu]ser',
+            'Customer\s?[Uu]ser'
+        )) {
         $dynT.Add([regex]::new("(?s)<label[^>]*>\s*$lb\s*:\s*</label>\s*<p[^>]+title=`"([^`"]+)`"", $roIc))
         $dynP.Add([regex]::new("(?s)<label[^>]*>\s*$lb\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>", $roIc))
     }
@@ -584,50 +588,72 @@ function Get-CustomerNameFromHtml {
     return 'N/D'
 }
 
+# Texto util para "Campo do cliente" / unidade: evita codigo numerico puro (CodigoCliente) sem descricao.
+function Test-UnidadeTextoUtil {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $t = $Text.Trim()
+    if ($t.Length -lt 2) { return $false }
+    if ($t -match '^\d+$') { return $false }
+    if ($t -match '[\p{L}]') { return $true }
+    if ($t -match '(?i)(loja|filial|unidade|matriz|agencia|predio|sala|andar)') { return $true }
+    return $false
+}
+
+function Try-MatchUnidadeDescriptive {
+    param(
+        [string]$HTML,
+        [string]$ExcludeEqualTo = $null
+    )
+    if ([string]::IsNullOrWhiteSpace($HTML)) { return '' }
+    Ensure-ZnunyParserRegexes
+    for ($ui = 0; $ui -lt $script:_RxUnitDynamicTitles.Count; $ui++) {
+        if (($m = $script:_RxUnitDynamicTitles[$ui].Match($HTML)).Success) {
+            $val = $m.Groups[1].Value.Trim()
+            if (-not (Test-UnidadeTextoUtil $val)) { continue }
+            if ($ExcludeEqualTo -and ($val -eq $ExcludeEqualTo.Trim())) { continue }
+            return $val
+        }
+        if (($m = $script:_RxUnitDynamicPs[$ui].Match($HTML)).Success) {
+            $val = (Remove-Html $m.Groups[1].Value).Trim()
+            if (-not (Test-UnidadeTextoUtil $val)) { continue }
+            if ($ExcludeEqualTo -and ($val -eq $ExcludeEqualTo.Trim())) { continue }
+            return $val
+        }
+    }
+    if (($m = $script:_RxUnidadeAltUsuario.Match($HTML)).Success) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and $val -notmatch '@' -and (Test-UnidadeTextoUtil $val)) {
+            if (-not $ExcludeEqualTo -or ($val -ne $ExcludeEqualTo.Trim())) { return $val }
+        }
+    }
+    if (($m = $script:_RxUnitUsuarioP.Match($HTML)).Success) {
+        $val = (Remove-Html $m.Groups[1].Value).Trim()
+        if ($val -and $val -notmatch '@' -and (Test-UnidadeTextoUtil $val)) {
+            if (-not $ExcludeEqualTo -or ($val -ne $ExcludeEqualTo.Trim())) { return $val }
+        }
+    }
+    if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
+        $nome = $m.Groups[1].Value.Trim()
+        if (($m2 = $script:_RxUnitNomeSuffixGen.Match($nome)).Success) {
+            $seg = $m2.Groups[1].Value.Trim()
+            if (Test-UnidadeTextoUtil $seg) {
+                if (-not $ExcludeEqualTo -or ($seg -ne $ExcludeEqualTo.Trim())) { return $seg }
+            }
+        }
+    }
+    return ''
+}
+
 function Get-CustomerUnitFromHtml {
     param(
         [string]$HTML,
         [switch]$FallbackOnly
     )
 
-    if (-not $FallbackOnly) {
-        Ensure-ZnunyParserRegexes
-
-        if (($m = $script:_RxUnidadeAltCodCliente.Match($HTML)).Success) {
-            $val = $m.Groups[1].Value.Trim()
-            if ($val) { return $val }
-        }
-        if (($m = $script:_RxUnitCodClienteP.Match($HTML)).Success) {
-            $val = (Remove-Html $m.Groups[1].Value).Trim()
-            if ($val) { return $val }
-        }
-
-        if (($m = $script:_RxUnidadeAltUsuario.Match($HTML)).Success) {
-            $val = $m.Groups[1].Value.Trim()
-            if ($val -and $val -notmatch '@') { return $val }
-        }
-        if (($m = $script:_RxUnitUsuarioP.Match($HTML)).Success) {
-            $val = (Remove-Html $m.Groups[1].Value).Trim()
-            if ($val -and $val -notmatch '@') { return $val }
-        }
-
-        for ($ui = 0; $ui -lt $script:_RxUnitDynamicTitles.Count; $ui++) {
-            if (($m = $script:_RxUnitDynamicTitles[$ui].Match($HTML)).Success) {
-                $val = $m.Groups[1].Value.Trim()
-                if ($val) { return $val }
-            }
-            if (($m = $script:_RxUnitDynamicPs[$ui].Match($HTML)).Success) {
-                $val = (Remove-Html $m.Groups[1].Value).Trim()
-                if ($val) { return $val }
-            }
-        }
-
-        if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
-            $nome = $m.Groups[1].Value.Trim()
-            if (($m2 = $script:_RxUnitNomeSuffix3.Match($nome)).Success) { return $m2.Groups[1].Value }
-            if (($m2 = $script:_RxUnitNomeSuffixGen.Match($nome)).Success) { return $m2.Groups[1].Value.Trim() }
-        }
-    }
+    if ($FallbackOnly) { return 'N/D' }
+    $u = Try-MatchUnidadeDescriptive $HTML
+    if ($u) { return $u }
     return 'N/D'
 }
 
@@ -707,19 +733,12 @@ function Get-TicketDataFromHtml {
 
     Write-Verbose "Resultado extracao: Cliente=$cliente, Unidade=$unidade (ticket $ticketID)"
 
-    # Ajuste: se unidade == cliente, algo saiu errado - tenta campo alternativo
-    if ($unidade -ne 'N/D' -and $unidade -ceq $cliente) {
+    # Ajuste: se unidade == cliente, algo saiu errado - tenta outro campo descritivo (ex.: Loja/Filial no widget)
+    if ($unidade -ne 'N/D' -and $unidade -eq $cliente) {
         Write-Verbose "Unidade igual ao Cliente, tentando campo alternativo..."
         $searchSrc = $widgetHtml + $HTML
-
-        if (($m = $script:_RxUnidadeAltUsuario.Match($searchSrc)).Success) {
-            $alt = $m.Groups[1].Value.Trim()
-            if ($alt -and $alt -notmatch '@') { $unidade = $alt }
-        }
-        elseif (($m = $script:_RxUnidadeAltCodCliente.Match($searchSrc)).Success) {
-            $alt = $m.Groups[1].Value.Trim()
-            if ($alt) { $unidade = $alt }
-        }
+        $alt = Try-MatchUnidadeDescriptive $searchSrc -ExcludeEqualTo $cliente
+        if ($alt) { $unidade = $alt }
         Write-Verbose "Apos ajuste: Cliente=$cliente, Unidade=$unidade"
     }
 
