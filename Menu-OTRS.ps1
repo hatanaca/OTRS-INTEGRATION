@@ -142,7 +142,7 @@ function Save-Config {
         HubBaseURL      = $Cfg.HubBaseURL
         SleepArticleMs  = $(if ($null -ne $Cfg.SleepArticleMs) { [int]$Cfg.SleepArticleMs } else { 5 })
         SleepTicketMs   = $(if ($null -ne $Cfg.SleepTicketMs)  { [int]$Cfg.SleepTicketMs  } else { 15 })
-    } | ConvertTo-Json | Out-File $Path -Encoding UTF8
+    } | ConvertTo-Json -Compress | Out-File $Path -Encoding UTF8
 }
 
 function Get-CfgStatus {
@@ -399,9 +399,11 @@ class TicketCache {
                 $v = $prop.Value
                 $notas = @()
                 if ($v.Notas) {
+                    $nl = [System.Collections.Generic.List[object]]::new()
                     foreach ($n in $v.Notas) {
-                        $notas += [PSCustomObject]@{ Date = $n.Date; Text = $n.Text }
+                        $nl.Add([PSCustomObject]@{ Date = $n.Date; Text = $n.Text })
                     }
+                    $notas = $nl.ToArray()
                 }
                 $this.Data[$prop.Name] = @{
                     Estado   = $v.Estado
@@ -461,6 +463,7 @@ function Ensure-ZnunyParserRegexes {
     $script:_RxTrArticleRows = [regex]::new('(?s)<tr[^>]*id="Row\d+"[^>]*>(.*?)</tr>', $ro)
     $script:_RxArtIdInRow = [regex]::new('<input[^>]+class="ArticleID"[^>]+value="(\d+)"', $roIc)
     $script:_RxArtDateInRow = [regex]::new('<td class="Created">[^<]*<div title="([^"]+)"', $ro)
+    $script:_RxArtDateSortKey = [regex]::new('^(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})', $ro)
     $script:_RxArtBody = [regex]::new('(?s)<body[^>]*>(.*)</body>', $roIc)
     $script:_RxStripStyle = [regex]::new('(?s)<style[^>]*>.*?</style>', $ro)
     $script:_RxStripScript = [regex]::new('(?s)<script[^>]*>.*?</script>', $ro)
@@ -489,6 +492,28 @@ function Ensure-ZnunyParserRegexes {
         try { $tokList.Add([regex]::new($tp, $roIc)) } catch { }
     }
     $script:_RxChallengeTokens = $tokList
+
+    # Cliente / unidade (HTML principal e widget) — evita [regex]::Match repetido por ticket
+    $script:_RxCustNomeTitle = [regex]::new('(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCustNomeP = [regex]::new('(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxCustNomeSuffixTail = [regex]::new('\s*-\s*\d+\s*$', $ro)
+    $script:_RxCustIdCliTitle = [regex]::new('(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCustIdCliA = [regex]::new('(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<a[^>]*>([^<]+)</a>', $roIc)
+    $script:_RxCustClienteTitle = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCustClienteP = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxUnitCodClienteP = [regex]::new('(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxUnitUsuarioP = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxUnitNomeSuffix3 = [regex]::new('-\s*(\d{3,})\s*$', $ro)
+    $script:_RxUnitNomeSuffixGen = [regex]::new('-\s*([^\s-][^-]*)\s*$', $ro)
+    $script:_RxHtmlTagProbe = [regex]::new('<[a-zA-Z!/]', $ro)
+    $dynT = [System.Collections.Generic.List[regex]]::new()
+    $dynP = [System.Collections.Generic.List[regex]]::new()
+    foreach ($lb in @('Unidade', 'Loja', 'C\s*o\s*d\s*i\s*g\s*o\s*Cliente', 'Custom\s?[Uu]ser', 'Customer\s?[Uu]ser')) {
+        $dynT.Add([regex]::new("(?s)<label[^>]*>\s*$lb\s*:\s*</label>\s*<p[^>]+title=`"([^`"]+)`"", $roIc))
+        $dynP.Add([regex]::new("(?s)<label[^>]*>\s*$lb\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>", $roIc))
+    }
+    $script:_RxUnitDynamicTitles = $dynT
+    $script:_RxUnitDynamicPs = $dynP
     $script:_ZnunyRxReady = $true
 }
 
@@ -497,7 +522,7 @@ function Get-ArticleBodyChunk {
     if (-not $Raw) { return '' }
     Ensure-ZnunyParserRegexes
     if (($m = $script:_RxArtBody.Match($Raw)).Success) { return $m.Groups[1].Value.Trim() }
-    if ($Raw -notmatch '<[a-zA-Z!/]') { return $Raw.Trim() }
+    if (-not $script:_RxHtmlTagProbe.IsMatch($Raw)) { return $Raw.Trim() }
     return ''
 }
 
@@ -525,47 +550,34 @@ function Remove-Html {
 
 function Get-CustomerNameFromHtml {
     param([string]$HTML)
+    Ensure-ZnunyParserRegexes
 
-    $pattern1 = @'
-(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-    if (($m = [regex]::Match($HTML, $pattern1)).Success) {
+    if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val) {
-            $val = $val -replace '\s*-\s*\d+\s*$', ''
-            return $val.Trim()
+            return $script:_RxCustNomeSuffixTail.Replace($val, '').Trim()
         }
     }
-    $pattern1b = @'
-(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>
-'@
-    if (($m = [regex]::Match($HTML, $pattern1b)).Success) {
+    if (($m = $script:_RxCustNomeP.Match($HTML)).Success) {
         $val = (Remove-Html $m.Groups[1].Value).Trim()
         if ($val) {
-            $val = $val -replace '\s*-\s*\d+\s*$', ''
-            return $val.Trim()
+            return $script:_RxCustNomeSuffixTail.Replace($val, '').Trim()
         }
     }
 
-    $pattern2 = @'
-(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-    if (($m = [regex]::Match($HTML, $pattern2)).Success) {
+    if (($m = $script:_RxCustIdCliTitle.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val) { return $val }
     }
-    if (($m = [regex]::Match($HTML, '(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<a[^>]*>([^<]+)</a>')).Success) {
+    if (($m = $script:_RxCustIdCliA.Match($HTML)).Success) {
         return $m.Groups[1].Value.Trim()
     }
 
-    $pattern3 = @'
-(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-    if (($m = [regex]::Match($HTML, $pattern3)).Success) {
+    if (($m = $script:_RxCustClienteTitle.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val) { return $val }
     }
-    if (($m = [regex]::Match($HTML, '(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>')).Success) {
+    if (($m = $script:_RxCustClienteP.Match($HTML)).Success) {
         $val = (Remove-Html $m.Groups[1].Value).Trim()
         if ($val) { return $val }
     }
@@ -579,64 +591,41 @@ function Get-CustomerUnitFromHtml {
     )
 
     if (-not $FallbackOnly) {
+        Ensure-ZnunyParserRegexes
 
-        $patternCod = @'
-(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($HTML, $patternCod)).Success) {
+        if (($m = $script:_RxUnidadeAltCodCliente.Match($HTML)).Success) {
             $val = $m.Groups[1].Value.Trim()
             if ($val) { return $val }
         }
-        if (($m = [regex]::Match($HTML, '(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>')).Success) {
+        if (($m = $script:_RxUnitCodClienteP.Match($HTML)).Success) {
             $val = (Remove-Html $m.Groups[1].Value).Trim()
             if ($val) { return $val }
         }
 
-        # Usuario: (login)
-        $patternUser = @'
-(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($HTML, $patternUser)).Success) {
+        if (($m = $script:_RxUnidadeAltUsuario.Match($HTML)).Success) {
             $val = $m.Groups[1].Value.Trim()
             if ($val -and $val -notmatch '@') { return $val }
         }
-        $patternUser2 = @'
-(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>
-'@
-        if (($m = [regex]::Match($HTML, $patternUser2)).Success) {
+        if (($m = $script:_RxUnitUsuarioP.Match($HTML)).Success) {
             $val = (Remove-Html $m.Groups[1].Value).Trim()
             if ($val -and $val -notmatch '@') { return $val }
         }
 
-        # Outros labels
-        $unitLabels = @(
-            'Unidade',
-            'Loja',
-            'C\s*o\s*d\s*i\s*g\s*o\s*Cliente',
-            'Custom\s?[Uu]ser',
-            'Customer\s?[Uu]ser'
-        )
-        foreach ($label in $unitLabels) {
-            $pattern = "(?s)<label[^>]*>\s*$label\s*:\s*</label>\s*<p[^>]+title=`"([^`"]+)`""
-            if (($m = [regex]::Match($HTML, $pattern)).Success) {
+        for ($ui = 0; $ui -lt $script:_RxUnitDynamicTitles.Count; $ui++) {
+            if (($m = $script:_RxUnitDynamicTitles[$ui].Match($HTML)).Success) {
                 $val = $m.Groups[1].Value.Trim()
                 if ($val) { return $val }
             }
-            $pattern2 = "(?s)<label[^>]*>\s*$label\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>"
-            if (($m = [regex]::Match($HTML, $pattern2)).Success) {
+            if (($m = $script:_RxUnitDynamicPs[$ui].Match($HTML)).Success) {
                 $val = (Remove-Html $m.Groups[1].Value).Trim()
                 if ($val) { return $val }
             }
         }
 
-        # Fallback: ultimo segmento numerico de "Nome:"
-        $patternNome = @'
-(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($HTML, $patternNome)).Success) {
+        if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
             $nome = $m.Groups[1].Value.Trim()
-            if ($nome -match '-\s*(\d{3,})\s*$') { return $matches[1] }
-            if ($nome -match '-\s*([^\s-][^-]*)\s*$') { return $matches[1].Trim() }
+            if (($m2 = $script:_RxUnitNomeSuffix3.Match($nome)).Success) { return $m2.Groups[1].Value }
+            if (($m2 = $script:_RxUnitNomeSuffixGen.Match($nome)).Success) { return $m2.Groups[1].Value.Trim() }
         }
     }
     return 'N/D'
@@ -647,7 +636,8 @@ function Test-AutoNote {
     if ($Text.Length -lt 5) { return $true }
     if ($null -eq $script:_AutoNoteRxList) {
         $lst = [System.Collections.Generic.List[System.Text.RegularExpressions.Regex]]::new()
-        $opt = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+        $opt = [System.Text.RegularExpressions.RegexOptions]::Compiled -bor
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
             [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
         foreach ($p in $script:CcoConfig.AutoNotePatterns) {
             try {
@@ -734,7 +724,6 @@ function Get-TicketDataFromHtml {
     }
 
     $articles = [System.Collections.Generic.List[object]]::new()
-    Ensure-ZnunyParserRegexes
     $rowMatches = $script:_RxTrArticleRows.Matches($HTML)
 
     # Linhas de artigo (sem baixar corpo ainda). Em modo limitado (ex.: 4 notas no live),
@@ -748,10 +737,10 @@ function Get-TicketDataFromHtml {
         $mDt = $script:_RxArtDateInRow.Match($rowHtml)
         if ($mDt.Success) { $adate = $mDt.Groups[1].Value } else { $adate = 'N/D' }
         $sortKey = [datetime]::MinValue
-        if ($adate -match '^(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})') {
+        if (($mSk = $script:_RxArtDateSortKey.Match($adate)).Success) {
             try {
-                $sortKey = Get-Date -Year ([int]$Matches[3]) -Month ([int]$Matches[2]) -Day ([int]$Matches[1]) `
-                    -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second 0
+                $sortKey = Get-Date -Year ([int]$mSk.Groups[3].Value) -Month ([int]$mSk.Groups[2].Value) -Day ([int]$mSk.Groups[1].Value) `
+                    -Hour ([int]$mSk.Groups[4].Value) -Minute ([int]$mSk.Groups[5].Value) -Second 0
             } catch {}
         }
         $rowList.Add([ordered]@{ Row = $rowHtml; Aid = $aid; Adate = $adate; SortKey = $sortKey })
@@ -761,15 +750,15 @@ function Get-TicketDataFromHtml {
     $unlimitedFetch = ($fetchLimit -ge 9000)
     $fetchCount = 0
 
-    $walk = [System.Collections.Generic.List[object]]::new()
-    if ($unlimitedArticles) {
-        foreach ($x in $rowList) { $walk.Add($x) }
-    } else {
-        foreach ($x in ($rowList | Sort-Object { $_.SortKey } -Descending)) { $walk.Add($x) }
+    if (-not $unlimitedArticles -and $rowList.Count -gt 1) {
+        $rowList.Sort([System.Comparison[object]]{
+            param($a, $b)
+            return ([datetime]$b.SortKey).CompareTo([datetime]$a.SortKey)
+        })
     }
 
     $articlePlainPreferred = $null
-    foreach ($item in $walk) {
+    foreach ($item in $rowList) {
         if (-not $unlimitedArticles -and $articles.Count -ge $maxArticles) { break }
         if (-not $unlimitedFetch -and $fetchCount -ge $fetchLimit) { break }
 
@@ -913,14 +902,9 @@ function Export-CcoReport {
         Write-Host "[DIAG] HTML principal -> $diagMainPath ($($diagMain.Length) chars)" -ForegroundColor Yellow
 
         $diagToken = ''
-        foreach ($tp in @(
-            'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
-            'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
-            '"ChallengeToken",\s*"([A-Za-z0-9]+)"',
-            'ChallengeToken=([A-Za-z0-9]{{16,}})',
-            'data-challenge-token="([A-Za-z0-9]+)"'
-        )) {
-            if (($m = [regex]::Match($diagMain, $tp)).Success) { $diagToken = $m.Groups[1].Value; break }
+        Ensure-ZnunyParserRegexes
+        foreach ($rxTok in $script:_RxChallengeTokens) {
+            if (($m = $rxTok.Match($diagMain)).Success) { $diagToken = $m.Groups[1].Value; break }
         }
 
         if ($diagToken) {
@@ -939,6 +923,9 @@ function Export-CcoReport {
     }
 
     $activeIds = $client.GetActiveTicketIDs($SearchPath)
+    $activeSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($id in $activeIds) { [void]$activeSet.Add($id) }
+
     $cache = [TicketCache]::new($EstadoFile)
 
     Write-Verbose "Ativos na busca: $($activeIds.Count)"
@@ -947,9 +934,14 @@ function Export-CcoReport {
     $allIds = [System.Collections.Generic.List[string]]::new()
     foreach ($id in $activeIds) { $allIds.Add($id) }
     foreach ($id in $cache.Data.Keys) {
-        if ($id -notin $allIds) { $allIds.Add($id) }
+        if (-not $activeSet.Contains($id)) { $allIds.Add($id) }
     }
-    $allIds = $allIds | Sort-Object { [int]$_ }
+    if ($allIds.Count -gt 1) {
+        $allIds.Sort([System.Comparison[string]]{
+            param($a, $b)
+            return ([int]$a).CompareTo([int]$b)
+        })
+    }
 
     Write-Verbose "Total a processar: $($allIds.Count)"
 
@@ -968,7 +960,7 @@ function Export-CcoReport {
             Write-Progress -Activity "Processando tickets" -Status "Ticket $tid ($progN/$($allIds.Count))" -PercentComplete $pct
         }
 
-        if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds) {
+        if ($cache.IsCachedAndResolved($tid) -and -not $activeSet.Contains($tid)) {
             Write-Verbose "TID $tid - CACHE"
             $ticket = $cache.GetCachedTicket($tid)
             $resolvidos.Add($ticket)
@@ -1314,6 +1306,7 @@ function Show-TicketCard {
 
     $W = [Math]::Max(50, [Console]::WindowWidth - 1)
     $H = [Console]::WindowHeight
+    Ensure-ZnunyParserRegexes
 
     # Linhas fixas: header(3) + blank + 5 info + blank + 3 notas-hdr + footer(2) + blank = 16
     # Se tem timer, +1 linha no footer
@@ -1405,7 +1398,7 @@ function Show-TicketCard {
             $dateFmt = Format-NoteDate $nota.Date
             $numPart = ($ni + 1).ToString().PadLeft(2)
             $prefix  = "  [" + $numPart + "] " + $dateFmt + "  "
-            $txt = ($nota.Text -replace '\s+', ' ').Trim()
+            $txt = $script:_RxStripWs.Replace($nota.Text, ' ').Trim()
             if ($txt.Length -gt $textW) { $txt = $txt.Substring(0, $textW - 3) + "..." }
             Write-Host $prefix -ForegroundColor DarkGray -NoNewline
             Write-Host $txt    -ForegroundColor White
@@ -1428,7 +1421,19 @@ function Load-TicketsFromCache {
     if (-not (Test-Path $CachePath)) { return @() }
     $cache = [TicketCache]::new($CachePath)
     $list  = [System.Collections.Generic.List[object]]::new()
-    foreach ($id in ($cache.Data.Keys | Sort-Object { [int]$_ })) {
+    $kc = $cache.Data.Keys.Count
+    $keyArr = New-Object string[] $kc
+    $ki = 0
+    foreach ($k in $cache.Data.Keys) {
+        $keyArr[$ki++] = [string]$k
+    }
+    if ($keyArr.Length -gt 1) {
+        [Array]::Sort($keyArr, [System.Comparison[string]]{
+            param($a, $b)
+            return ([int]$a).CompareTo([int]$b)
+        })
+    }
+    foreach ($id in $keyArr) {
         $list.Add($cache.GetCachedTicket($id))
     }
     return @($list)
