@@ -2006,18 +2006,85 @@ function Test-HubRelatorioChanged {
     return $false
 }
 
-function Show-HubTicketPreview {
+function Test-HubPayloadCompleto {
     param($Payload)
-    Write-Host "  Ticket   : #" -ForegroundColor DarkGray -NoNewline
-    Write-Host $Payload.number -ForegroundColor Yellow
-    Write-Host "  Cliente  : " -ForegroundColor DarkGray -NoNewline
-    Write-Host $Payload.client -ForegroundColor White
-    Write-Host "  Estado   : " -ForegroundColor DarkGray -NoNewline
-    Write-Host $Payload.status -ForegroundColor Yellow
-    Write-Host "  Abertura : " -ForegroundColor DarkGray -NoNewline
-    Write-Host ($Payload.openingDate + " " + $Payload.openingHour) -ForegroundColor White
-    Write-Host "  Atualizac: " -ForegroundColor DarkGray -NoNewline
-    Write-Host ($Payload.updates.Count.ToString() + " notas") -ForegroundColor White
+    $probs = [System.Collections.Generic.List[string]]::new()
+    if ($null -eq $Payload) {
+        [void]$probs.Add('Dados do chamado indisponiveis (payload nulo).')
+        return @{ ok = $false; problemas = @($probs) }
+    }
+    $num = [string]$Payload.number
+    if ([string]::IsNullOrWhiteSpace($num)) { [void]$probs.Add('Numero do chamado vazio.') }
+    $st = [string]$Payload.status
+    if ([string]::IsNullOrWhiteSpace($st)) { [void]$probs.Add('Estado vazio.') }
+    $cl = [string]$Payload.client
+    if ([string]::IsNullOrWhiteSpace($cl)) { [void]$probs.Add('Cliente vazio.') }
+    $od = [string]$Payload.openingDate
+    $oh = [string]$Payload.openingHour
+    if ([string]::IsNullOrWhiteSpace($od)) { [void]$probs.Add('Data de abertura vazia ou nao reconhecida no cache (formato esperado AAAA-MM-DD).') }
+    elseif ($od -notmatch '^\d{4}-\d{2}-\d{2}$') { [void]$probs.Add('Data de abertura invalida: "' + $od + '" (use AAAA-MM-DD).') }
+    if ([string]::IsNullOrWhiteSpace($oh)) { [void]$probs.Add('Hora de abertura vazia ou nao reconhecida (formato esperado HH:MM).') }
+    elseif ($oh -notmatch '^\d{2}:\d{2}$') { [void]$probs.Add('Hora de abertura invalida: "' + $oh + '" (use HH:MM).') }
+    $ups = @($Payload.updates)
+    if ($ups.Count -eq 0) { [void]$probs.Add('Nenhuma nota/atualizacao no payload (e obrigatorio pelo menos uma para o relatorio).') }
+    $i = 0
+    foreach ($u in $ups) {
+        $i++
+        $ud = ''
+        if ($null -ne $u.updateDate) { $ud = [string]$u.updateDate } elseif ($null -ne $u.date) { $ud = [string]$u.date }
+        $uh = ''
+        if ($null -ne $u.updateHour) { $uh = [string]$u.updateHour } elseif ($null -ne $u.hour) { $uh = [string]$u.hour }
+        $tx = if ($null -ne $u.text) { [string]$u.text } else { '' }
+        if ([string]::IsNullOrWhiteSpace($ud)) { [void]$probs.Add('Nota ' + $i.ToString() + ': data da atualizacao vazia.') }
+        elseif ($ud -notmatch '^\d{4}-\d{2}-\d{2}$') { [void]$probs.Add('Nota ' + $i.ToString() + ': data invalida ("' + $ud + '").') }
+        if ([string]::IsNullOrWhiteSpace($uh)) { [void]$probs.Add('Nota ' + $i.ToString() + ': hora da atualizacao vazia.') }
+        elseif ($uh -notmatch '^\d{2}:\d{2}$') { [void]$probs.Add('Nota ' + $i.ToString() + ': hora invalida ("' + $uh + '").') }
+        if ([string]::IsNullOrWhiteSpace($tx)) { [void]$probs.Add('Nota ' + $i.ToString() + ': texto vazio.') }
+    }
+    return @{ ok = ($probs.Count -eq 0); problemas = @($probs) }
+}
+
+function Show-HubPayloadRevisaoCompleta {
+    param($Payload, [int]$MaxCharsNota = 8000)
+    Write-Host ""
+    Write-ThinDiv 'Cyan'
+    Write-Host "  === REVISAO COMPLETA (conferir antes do Hub) ===" -ForegroundColor Cyan
+    Write-Host ("  Numero .: #" + [string]$Payload.number) -ForegroundColor White
+    Write-Host ("  Estado ..: " + [string]$Payload.status) -ForegroundColor White
+    Write-Host ("  Cliente .: " + [string]$Payload.client) -ForegroundColor White
+    Write-Host ("  Abertura : " + [string]$Payload.openingDate + " " + [string]$Payload.openingHour) -ForegroundColor White
+    Write-Host ("  Notas ...: " + @($Payload.updates).Count.ToString()) -ForegroundColor White
+    Write-ThinDiv 'Cyan'
+    $idx = 0
+    foreach ($u in @($Payload.updates)) {
+        $idx++
+        $ud = if ($null -ne $u.updateDate) { [string]$u.updateDate } elseif ($null -ne $u.date) { [string]$u.date } else { '' }
+        $uh = if ($null -ne $u.updateHour) { [string]$u.updateHour } elseif ($null -ne $u.hour) { [string]$u.hour } else { '' }
+        $tx = if ($null -ne $u.text) { [string]$u.text } else { '' }
+        Write-Host ("  --- Nota " + $idx.ToString() + " | " + $ud + " " + $uh + " ---") -ForegroundColor Yellow
+        $origLen = $tx.Length
+        if ($origLen -gt $MaxCharsNota) {
+            $tx = $tx.Substring(0, $MaxCharsNota) + "`n  ... [truncado na tela; total " + $origLen.ToString() + " caracteres]"
+        }
+        foreach ($line in ($tx -split "`r?`n")) {
+            Write-Host ("      " + $line) -ForegroundColor Gray
+        }
+    }
+    Write-ThinDiv 'Cyan'
+    Write-Host ""
+}
+
+function Confirm-HubOperadorValidouCampos {
+    Write-Warn "O Hub so sera alterado apos sua confirmacao explicita."
+    Write-Host "  O campo Ocorrencia no Hub continua manual (nao enviado por este script)." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Se conferiu numero, estado, cliente, abertura e cada nota, digite:" -ForegroundColor Yellow
+    Write-Host "  CONFIRMO" -ForegroundColor Green
+    Write-Host "  (maiusculas ou minusculas). Qualquer outro texto ou Enter cancela." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Resposta: " -ForegroundColor Yellow -NoNewline
+    $t = Read-Host
+    return ($null -ne $t -and $t.Trim().ToUpperInvariant() -eq 'CONFIRMO')
 }
 
 function Invoke-SyncHub {
@@ -2027,6 +2094,7 @@ function Invoke-SyncHub {
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
     Write-Info "O campo Ocorrencia do Hub nao e alterado por esta sincronizacao (preenchimento manual)."
+    Write-Info "Cada POST/PUT exige revisao completa na tela, validacao automatica dos campos e digitacao exata CONFIRMO."
     Write-Host ""
 
     # Credenciais do Hub
@@ -2113,19 +2181,26 @@ function Invoke-SyncHub {
             if (Test-HubRelatorioChanged $hub $payload) {
                 Write-Host ""
                 Write-Host ("  [UPD] #" + $num + " - diferenca em relacao ao Hub (estado, cliente, datas ou notas)") -ForegroundColor Cyan
-                Show-HubTicketPreview $payload
-                Write-Host "  Atualizar registro no Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
-                $r = Read-Host
-                if ($r -eq '' -or $r -match '^[Ss]') {
-                    try {
-                        Hub-Put $hubUrl ("/api/relatorio/" + $num) $payload | Out-Null
-                        Write-OK ("Atualizado: #" + $num)
-                        $nUpd++
-                    } catch {
-                        Write-Warn ("Falha: " + $_)
-                    }
-                } else {
-                    Write-Info ("Pulado: #" + $num) ; $nSkip++
+                Show-HubPayloadRevisaoCompleta $payload
+                $chk = Test-HubPayloadCompleto $payload
+                if (-not $chk.ok) {
+                    Write-Warn "Validacao automatica falhou; Hub NAO sera alterado para este chamado:"
+                    foreach ($pr in @($chk.problemas)) { Write-Warn ("  - " + $pr) }
+                    Write-Info ("Corrija na origem (OTRS/relatorio) e regenere o cache antes de sincronizar de novo: #" + $num)
+                    $nSkip++
+                    continue
+                }
+                if (-not (Confirm-HubOperadorValidouCampos)) {
+                    Write-Info ("Envio cancelado pelo operador: #" + $num)
+                    $nSkip++
+                    continue
+                }
+                try {
+                    Hub-Put $hubUrl ("/api/relatorio/" + $num) $payload | Out-Null
+                    Write-OK ("Atualizado: #" + $num)
+                    $nUpd++
+                } catch {
+                    Write-Warn ("Falha: " + $_)
                 }
             } else {
                 Write-Host ("  [=] #" + $num + " sem alteracoes") -ForegroundColor DarkGray
@@ -2136,26 +2211,33 @@ function Invoke-SyncHub {
             Write-Host ""
             Write-ThinDiv 'Yellow'
             Write-Host "  NOVO TICKET:" -ForegroundColor Yellow
-            Show-HubTicketPreview $payload
-            Write-Host "  Adicionar ao Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
-            $r = Read-Host
-            if ($r -eq '' -or $r -match '^[Ss]') {
-                try {
-                    Hub-Post $hubUrl "/api/relatorio" $payload | Out-Null
-                    Write-OK ("Adicionado: #" + $num)
-                    $nNew++
-                } catch {
-                    Write-Warn ("Falha: " + $_)
-                }
-            } else {
-                Write-Info ("Pulado: #" + $num) ; $nSkip++
+            Show-HubPayloadRevisaoCompleta $payload
+            $chk = Test-HubPayloadCompleto $payload
+            if (-not $chk.ok) {
+                Write-Warn "Validacao automatica falhou; Hub NAO recebera este chamado:"
+                foreach ($pr in @($chk.problemas)) { Write-Warn ("  - " + $pr) }
+                Write-Info ("Corrija na origem e regenere o cache: #" + $num)
+                $nSkip++
+                continue
+            }
+            if (-not (Confirm-HubOperadorValidouCampos)) {
+                Write-Info ("Envio cancelado pelo operador: #" + $num)
+                $nSkip++
+                continue
+            }
+            try {
+                Hub-Post $hubUrl "/api/relatorio" $payload | Out-Null
+                Write-OK ("Adicionado: #" + $num)
+                $nNew++
+            } catch {
+                Write-Warn ("Falha: " + $_)
             }
         }
     }
 
     Write-Host ""
     Write-Divider 'DarkGray'
-    Write-OK ($nNew.ToString() + " adicionados   " + $nUpd.ToString() + " atualizados   " + $nSkip.ToString() + " sem alteracao")
+    Write-OK ($nNew.ToString() + " adicionados   " + $nUpd.ToString() + " atualizados   " + $nSkip.ToString() + " sem envio ou sem alteracao")
     Pause-Screen
 }
 
