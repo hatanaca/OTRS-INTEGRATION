@@ -1751,7 +1751,7 @@ function Show-MainMenu {
         switch ($choice.Trim()) {
             '1' { Invoke-GerarTxt  $Cfg $ExportScript }
             '2' { Invoke-GerarJson $Cfg $ExportScript }
-            '3' { Show-Visualizador $Cfg $ExportScript }
+            '3' { Show-VisualizadorMenu $Cfg $ExportScript }
             '4' { $Cfg = Show-LoginScreen $Cfg }
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
