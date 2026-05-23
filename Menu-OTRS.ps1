@@ -1707,47 +1707,218 @@ function Show-VisualizadorMenu {
 
 
 # =============================================================================
-# Integracao com Hub (http://172.16.0.49:3210)
+# Integracao com Hub (http://172.16.0.49:3210) — API externa: validacao e timeouts
 # =============================================================================
 $script:HubSession = $null
+$script:HubRequestTimeoutSec = 90
+
+function Hub-InvokeWebRequest {
+    param(
+        [string]$Uri,
+        [string]$Method = 'GET',
+        [object]$WebSession = $null,
+        [string]$ContentType = $null,
+        [string]$Body = $null,
+        [int]$TimeoutSec = 0,
+        [string]$SessionVariable = $null
+    )
+    if ($TimeoutSec -le 0) { $TimeoutSec = $script:HubRequestTimeoutSec }
+    $p = @{
+        Uri             = $Uri
+        Method          = $Method
+        UseBasicParsing = $true
+        TimeoutSec      = $TimeoutSec
+        ErrorAction     = 'Stop'
+    }
+    if ($SessionVariable) {
+        $p.SessionVariable = $SessionVariable
+    } elseif ($WebSession) {
+        $p.WebSession = $WebSession
+    }
+    if ($ContentType) { $p.ContentType = $ContentType }
+    if ($null -ne $Body) { $p.Body = $Body }
+    $resp = Invoke-WebRequest @p
+    if ($SessionVariable) {
+        $script:HubSession = Get-Variable -Name $SessionVariable -Scope Local -ValueOnly -ErrorAction Stop
+        Remove-Variable -Name $SessionVariable -Scope Local -ErrorAction SilentlyContinue
+    }
+    return $resp
+}
+
+function Normalize-HubUpdatesFromAny {
+    param($updates)
+    $list = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $updates) { return $list }
+    foreach ($u in @($updates)) {
+        if ($null -eq $u) { continue }
+        $d = ''
+        if ($null -ne $u.date) { $d = [string]$u.date }
+        elseif ($null -ne $u.updateDate) { $d = [string]$u.updateDate }
+        $h = ''
+        if ($null -ne $u.hour) { $h = [string]$u.hour }
+        elseif ($null -ne $u.updateHour) { $h = [string]$u.updateHour }
+        $tx = if ($null -ne $u.text) { [string]$u.text } else { '' }
+        $list.Add([ordered]@{ date = $d.Trim(); hour = $h.Trim(); text = $tx })
+    }
+    return $list
+}
+
+function Normalize-HubTicketObject {
+    param($ht)
+    if ($null -eq $ht) { return $null }
+    $num = $ht.number
+    if ($null -eq $num) { return $null }
+    $nu = ([string]$num).Trim()
+    if ($nu.Length -eq 0) { return $null }
+    return [ordered]@{
+        number      = $nu
+        status      = if ($null -ne $ht.status) { [string]$ht.status } else { '' }
+        openingDate = if ($null -ne $ht.openingDate) { [string]$ht.openingDate } else { '' }
+        openingHour = if ($null -ne $ht.openingHour) { [string]$ht.openingHour } else { '' }
+        client      = if ($null -ne $ht.client) { [string]$ht.client } else { '' }
+        updates     = @((Normalize-HubUpdatesFromAny $ht.updates))
+    }
+}
+
+function Parse-HubRelatorioResponseToTickets {
+    param($obj, [System.Collections.Generic.List[string]]$warnOut)
+    $out = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $obj) {
+        [void]$warnOut.Add('Resposta JSON nula do Hub.')
+        return $out
+    }
+    if ($obj -is [System.Array]) {
+        foreach ($x in $obj) {
+            $n = Normalize-HubTicketObject $x
+            if ($n) { $out.Add($n) }
+            elseif ($null -ne $x) { [void]$warnOut.Add('Item na lista ignorado: sem campo number valido.') }
+        }
+        return $out
+    }
+    $hasSuccess = $obj.PSObject.Properties.Match('success')
+    if ($hasSuccess.Count -gt 0 -and $obj.success -eq $false) {
+        [void]$warnOut.Add('Hub retornou success=false; lista de tickets nao sera usada.')
+        return $out
+    }
+    if ($null -ne $obj.tickets) {
+        foreach ($x in @($obj.tickets)) {
+            $n = Normalize-HubTicketObject $x
+            if ($n) { $out.Add($n) }
+            else { [void]$warnOut.Add('Ticket ignorado no array tickets: number invalido ou ausente.') }
+        }
+        return $out
+    }
+    $single = Normalize-HubTicketObject $obj
+    if ($single) { $out.Add($single) }
+    return $out
+}
+
+function Get-HubRelatorioTicketsList {
+    param([string]$HubUrl)
+    $warn = [System.Collections.Generic.List[string]]::new()
+    $base = $HubUrl.TrimEnd('/')
+    $tries = @(
+        @{ Path = '/api/relatorio/tickets'; Label = 'GET /api/relatorio/tickets' },
+        @{ Path = '/api/relatorio'; Label = 'GET /api/relatorio (legado)' }
+    )
+    foreach ($tr in $tries) {
+        try {
+            $uri = $base + $tr.Path
+            $resp = Hub-InvokeWebRequest -Uri $uri -Method GET -WebSession $script:HubSession
+            $raw = $resp.Content
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                [void]$warn.Add($tr.Label + ': corpo vazio.')
+                continue
+            }
+            $obj = $null
+            try {
+                $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                [void]$warn.Add($tr.Label + ': JSON invalido - ' + $_.Exception.Message)
+                continue
+            }
+            $list = Parse-HubRelatorioResponseToTickets $obj $warn
+            $syncV = $null
+            $syncAt = $null
+            if ($obj -and $obj -isnot [System.Array]) {
+                if ($obj.PSObject.Properties.Match('syncVersion').Count -gt 0) { $syncV = $obj.syncVersion }
+                if ($obj.PSObject.Properties.Match('syncUpdatedAt').Count -gt 0) { $syncAt = [string]$obj.syncUpdatedAt }
+            }
+            return @{
+                ok            = $true
+                tickets       = @($list)
+                syncVersion   = $syncV
+                syncUpdatedAt = $syncAt
+                source        = $tr.Label
+                warnings      = $warn
+            }
+        } catch {
+            [void]$warn.Add($tr.Label + ' falhou: ' + $_.Exception.Message)
+        }
+    }
+    return @{ ok = $false; tickets = @(); syncVersion = $null; syncUpdatedAt = $null; source = ''; warnings = $warn }
+}
+
+function Hub-VerifySession {
+    param([string]$HubUrl)
+    $base = $HubUrl.TrimEnd('/')
+    try {
+        $resp = Hub-InvokeWebRequest -Uri ($base + '/api/status/me') -Method GET -WebSession $script:HubSession
+        $j = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+        if ($j -and $j.email) {
+            Write-OK ('Sessao Hub valida: ' + [string]$j.email)
+            return $true
+        }
+        Write-Warn 'GET /api/status/me nao retornou email; sessao pode estar incompleta.'
+        return $false
+    } catch {
+        Write-Warn ('Validacao de sessao ignorada (/api/status/me): ' + $_.Exception.Message)
+        return $false
+    }
+}
 
 function Hub-Login {
     param([string]$HubUrl, [string]$Email, [string]$Pass)
     $base = $HubUrl.TrimEnd('/')
     $loginBody = (@{ email = $Email; password = $Pass } | ConvertTo-Json -Compress)
-    $resp = Invoke-WebRequest -Uri ($base + "/api/login") `
-        -Method POST -ContentType "application/json; charset=utf-8" -Body $loginBody `
-        -SessionVariable 'WebSess' -UseBasicParsing
-    $script:HubSession = $WebSess
-    return $resp.Content | ConvertFrom-Json
+    $sv = 'HubSess_' + ([Guid]::NewGuid().ToString('N').Substring(0, 12))
+    $resp = Hub-InvokeWebRequest -Uri ($base + '/api/login') -Method POST `
+        -ContentType 'application/json; charset=utf-8' -Body $loginBody `
+        -SessionVariable $sv
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Hub-Get {
     param([string]$HubUrl, [string]$Path)
     $base = $HubUrl.TrimEnd('/')
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method GET -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    $resp = Hub-InvokeWebRequest -Uri ($base + $Path) -Method GET -WebSession $script:HubSession
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Hub-Post {
     param([string]$HubUrl, [string]$Path, $Body)
     $base = $HubUrl.TrimEnd('/')
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method POST -ContentType "application/json" -Body $json `
-        -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    $resp = Hub-InvokeWebRequest -Uri ($base + $Path) -Method POST `
+        -ContentType 'application/json; charset=utf-8' -Body $json -WebSession $script:HubSession
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Hub-Put {
     param([string]$HubUrl, [string]$Path, $Body)
     $base = $HubUrl.TrimEnd('/')
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method PUT -ContentType "application/json" -Body $json `
-        -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    $resp = Hub-InvokeWebRequest -Uri ($base + $Path) -Method PUT `
+        -ContentType 'application/json; charset=utf-8' -Body $json -WebSession $script:HubSession
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Build-HubTicket {
@@ -1769,7 +1940,8 @@ function Build-HubTicket {
             $uDate = $Matches[3] + "-" + $Matches[2] + "-" + $Matches[1]
             $uHour = $Matches[4] + ":" + $Matches[5]
         }
-        $updates.Add([ordered]@{ date=$uDate; hour=$uHour; text=$n.Text })
+        # Contrato observado na API GET do Hub (updateDate / updateHour / text)
+        $updates.Add([ordered]@{ updateDate = $uDate; updateHour = $uHour; text = $n.Text })
     }
 
     # Campos alinhados ao formulario do Hub (relatorio CCO). O campo "ocorrencia" nao e enviado
@@ -1787,12 +1959,14 @@ function Build-HubTicket {
 function Test-HubRelatorioChanged {
     param($hubTicket, $payload)
     if (-not $hubTicket) { return $true }
-    if (($hubTicket.status -or '') -ne ($payload.status -or '')) { return $true }
-    if (($hubTicket.openingDate -or '') -ne ($payload.openingDate -or '')) { return $true }
-    if (($hubTicket.openingHour -or '') -ne ($payload.openingHour -or '')) { return $true }
-    if (($hubTicket.client -or '') -ne ($payload.client -or '')) { return $true }
+    $pn = Normalize-HubTicketObject $payload
+    if (-not $pn) { return $true }
+    if (($hubTicket.status -or '') -ne ($pn.status -or '')) { return $true }
+    if (($hubTicket.openingDate -or '') -ne ($pn.openingDate -or '')) { return $true }
+    if (($hubTicket.openingHour -or '') -ne ($pn.openingHour -or '')) { return $true }
+    if (($hubTicket.client -or '') -ne ($pn.client -or '')) { return $true }
     $hu = @($hubTicket.updates)
-    $pu = @($payload.updates)
+    $pu = @($pn.updates)
     if ($hu.Count -ne $pu.Count) { return $true }
     for ($i = 0; $i -lt $hu.Count; $i++) {
         if (($hu[$i].text -or '') -ne ($pu[$i].text -or '')) { return $true }
@@ -1837,29 +2011,32 @@ function Invoke-SyncHub {
     # Login
     Write-Info "Conectando ao Hub..."
     try {
-        $loginResp = Hub-Login $hubUrl $hubEmail $hubPass
+        $null = Hub-Login $hubUrl $hubEmail $hubPass
         Write-OK "Login realizado no Hub."
     } catch {
         Write-Err ("Falha no login: " + $_); Pause-Screen; return
     }
 
-    # Tickets existentes no Hub
+    $null = Hub-VerifySession $hubUrl
+
+    # Tickets existentes no Hub (GET /api/relatorio/tickets com fallback e validacao)
     Write-Info "Buscando tickets no Hub..."
     $existingMap = @{}
-    try {
-        $hubTickets = Hub-Get $hubUrl "/api/relatorio"
-        if ($null -ne $hubTickets) {
-            if ($hubTickets -is [System.Array]) {
-                foreach ($ht in $hubTickets) {
-                    if ($ht.number) { $existingMap[$ht.number.ToString()] = $ht }
-                }
-            } elseif ($hubTickets.number) {
-                $existingMap[$hubTickets.number.ToString()] = $hubTickets
-            }
+    $hubListResult = Get-HubRelatorioTicketsList $hubUrl
+    foreach ($w in @($hubListResult.warnings)) {
+        if ($w) { Write-Warn $w }
+    }
+    if (-not $hubListResult.ok) {
+        Write-Warn "Nao foi possivel obter lista de tickets do Hub; sincronizacao tratara todos como novos (POST)."
+    } else {
+        Write-Info ("Fonte: " + $hubListResult.source)
+        if ($null -ne $hubListResult.syncVersion) {
+            Write-Info ("syncVersion: " + [string]$hubListResult.syncVersion + "  syncUpdatedAt: " + [string]$hubListResult.syncUpdatedAt)
         }
-        Write-OK ($existingMap.Count.ToString() + " tickets encontrados no Hub.")
-    } catch {
-        Write-Warn ("Nao foi possivel buscar tickets existentes: " + $_)
+        foreach ($t in @($hubListResult.tickets)) {
+            if ($t -and $t.number) { $existingMap[[string]$t.number] = $t }
+        }
+        Write-OK ($existingMap.Count.ToString() + " tickets encontrados no Hub (normalizados).")
     }
 
     # Tickets do OTRS (cache)
