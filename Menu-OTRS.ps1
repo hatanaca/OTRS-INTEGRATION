@@ -2215,6 +2215,164 @@ function Show-SalvarCredenciais {
 }
 
 # =============================================================================
+# Diagnostico de rede (ping / tracert) — didatico; destino validado
+# =============================================================================
+
+function Test-IsWindowsHost {
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $null -ne $PSVersionTable.Platform) {
+        return $PSVersionTable.Platform -eq 'Win32NT'
+    }
+    return $env:OS -eq 'Windows_NT'
+}
+
+function Test-DestinoRedeSeguro {
+    param([string]$Texto)
+    if ([string]::IsNullOrWhiteSpace($Texto)) { return $false }
+    $t = $Texto.Trim()
+    if ($t.Length -gt 253) { return $false }
+    if ($t -match '[\s;|&`$<>''"\\]') { return $false }
+    if ($t -notmatch '^[a-zA-Z0-9.\-:\[\]%]+$') { return $false }
+    return $true
+}
+
+function Read-DestinoRede {
+    param([string]$TituloAjuda)
+    Write-Host ""
+    Write-Info $TituloAjuda
+    Write-Host "  Exemplos validos:  google.com   8.8.8.8   znuny.suaempresa.local" -ForegroundColor DarkGray
+    Write-Host "  (Use apenas letras, numeros, pontos, hifens e dois-pontos em IPv6.)" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Destino: " -ForegroundColor Yellow -NoNewline
+    $d = Read-Host
+    return $(if ($null -eq $d) { '' } else { $d.Trim() })
+}
+
+function Show-PingDidatico {
+    Write-Banner
+    Write-Centered "-- TESTE DE PING --" 'White'
+    Write-Host ""
+    Write-Host "  O que e o ping?" -ForegroundColor Cyan
+    Write-Host "  E um teste simples: seu computador envia alguns pacotes pequenos ate o"
+    Write-Host "  destino e espera resposta. Se houver resposta, em geral o caminho ate la"
+    Write-Host "  esta funcionando. O tempo em milissegundos (ms) indica atraso (latencia)."
+    Write-Host ""
+    Write-Host "  O que NAO e o ping?" -ForegroundColor DarkGray
+    Write-Host "  Nao prova que um site ou servico (porta) esta no ar — so testa alcance"
+    Write-Host "  basico na rede. Alguns firewalls bloqueiam ping; falha nem sempre e problema seu."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o host ou IP que deseja testar (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio. Use apenas nome ou IP, sem espacos ou caracteres especiais."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Executando ping (4 tentativas) para: " + $dest)
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        if (Test-IsWindowsHost) {
+            $pingExe = Join-Path $env:SystemRoot 'System32\ping.exe'
+            if (-not (Test-Path -LiteralPath $pingExe)) { throw "ping.exe nao encontrado." }
+            $proc = Start-Process -FilePath $pingExe -ArgumentList @('-n', '4', $dest) -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warn ("Ping finalizou com codigo " + $proc.ExitCode.ToString() + " (nem sempre indica falha total; leia as linhas acima).")
+            }
+        } else {
+            $pingCmd = Get-Command ping -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            $pingPath = $null
+            if ($pingCmd) {
+                if ($pingCmd.PSObject.Properties['Path'] -and $pingCmd.Path) { $pingPath = [string]$pingCmd.Path }
+                elseif ($pingCmd.PSObject.Properties['Source'] -and $pingCmd.Source) { $pingPath = [string]$pingCmd.Source }
+            }
+            if (-not $pingPath) { throw "Comando ping nao encontrado neste sistema." }
+            $proc = Start-Process -FilePath $pingPath -ArgumentList @('-c', '4', $dest) -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warn ("Ping finalizou com codigo " + $proc.ExitCode.ToString() + ".")
+            }
+        }
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: tempos estaveis e baixos (ex.: abaixo de 50 ms na mesma cidade) costumam ser bons sinais."
+    Pause-Screen
+}
+
+function Show-TracertDidatico {
+    Write-Banner
+    Write-Centered "-- TRACERT (CAMINHO / ROTA) --" 'White'
+    Write-Host ""
+    Write-Host "  O que e o tracert?" -ForegroundColor Cyan
+    Write-Host "  (No Linux costuma chamar-se traceroute — aqui usamos o comando do sistema.)"
+    Write-Host "  Ele mostra cada ""salto"" (roteador) entre o seu PC e o destino, em ordem."
+    Write-Host "  Assim da para ver em qual trecho a rota demora mais ou para de responder."
+    Write-Host ""
+    Write-Host "  Como ler rapidamente:" -ForegroundColor Yellow
+    Write-Host "  - Cada linha e um passo na rede; tres tempos sao tres medicoes para aquele salto."
+    Write-Host "  - ""*"" ou ""Request timed out"" em um salto nem sempre e problema — alguns roteadores nao respondem a ping."
+    Write-Host "  - Se o destino final nunca aparece, pode haver bloqueio ou caminho interrompido."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o host ou IP para rastrear a rota (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio. Use apenas nome ou IP, sem espacos ou caracteres especiais."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Rastreando rota (ate 30 saltos) para: " + $dest)
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        if (Test-IsWindowsHost) {
+            $exe = Join-Path $env:SystemRoot 'System32\tracert.exe'
+            if (-not (Test-Path -LiteralPath $exe)) { throw "tracert.exe nao encontrado." }
+            $proc = Start-Process -FilePath $exe -ArgumentList @('-h', '30', '-w', '2000', $dest) -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warn ("Tracert finalizou com codigo " + $proc.ExitCode.ToString() + ".")
+            }
+        } else {
+            $tr = Get-Command traceroute -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            $trPath = $null
+            if ($tr) {
+                if ($tr.PSObject.Properties['Path'] -and $tr.Path) { $trPath = [string]$tr.Path }
+                elseif ($tr.PSObject.Properties['Source'] -and $tr.Source) { $trPath = [string]$tr.Source }
+            }
+            if ($trPath) {
+                $proc = Start-Process -FilePath $trPath -ArgumentList @('-m', '30', $dest) -NoNewWindow -Wait -PassThru
+            } else {
+                $tp = Get-Command tracepath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                $tpPath = $null
+                if ($tp) {
+                    if ($tp.PSObject.Properties['Path'] -and $tp.Path) { $tpPath = [string]$tp.Path }
+                    elseif ($tp.PSObject.Properties['Source'] -and $tp.Source) { $tpPath = [string]$tp.Source }
+                }
+                if ($tpPath) {
+                    $proc = Start-Process -FilePath $tpPath -ArgumentList @($dest) -NoNewWindow -Wait -PassThru
+                } else {
+                    throw "Nao encontrei traceroute nem tracepath. Instale um deles ou use o menu no Windows."
+                }
+            }
+        }
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: compare com o ping — se o ping funciona mas o tracert trava no meio, ainda pode haver rota assimétrica ou filtros."
+    Pause-Screen
+}
+
+# =============================================================================
 # Menu principal
 # =============================================================================
 
@@ -2239,6 +2397,9 @@ function Show-MainMenu {
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
         Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login /api/login e envio para /api/relatorio (sem ocorrencia)'
         Write-Host ""
+        Write-MenuOpt '8' 'Teste de ping'         'Green'    'Voce informa so o destino; texto explica o que e latencia'
+        Write-MenuOpt '9' 'Tracert (rota)'        'Green'    'Mostra os saltos ate o destino; leitura didatica do resultado'
+        Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
         Write-ThinDiv 'DarkGray'
@@ -2254,6 +2415,8 @@ function Show-MainMenu {
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
             '7' { Invoke-SyncHub $Cfg $ExportScript }
+            '8' { Show-PingDidatico }
+            '9' { Show-TracertDidatico }
             '0' {
                 Write-Banner
                 Write-Centered "Ate logo!" 'DarkCyan'
