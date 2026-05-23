@@ -249,10 +249,12 @@ class OtrsClient {
     [string]$BaseURL
     [object]$Session
     [int]$RetryMax
+    [int]$TimeoutSec
 
     OtrsClient([string]$baseUrl, [int]$retryMax = 3) {
-        $this.BaseURL  = $baseUrl.TrimEnd('/')
-        $this.RetryMax = $retryMax
+        $this.BaseURL    = $baseUrl.TrimEnd('/')
+        $this.RetryMax   = $retryMax
+        $this.TimeoutSec = 120
     }
 
     [void] Login([string]$user, [string]$pass) {
@@ -260,7 +262,8 @@ class OtrsClient {
         $body = @{ Action='Login'; RequestedURL=''; Lang='pt_BR'; TimeOffset='-180'; User=$user; Password=$pass }
         try {
             $tempSession = $null
-            $response = Invoke-WebRequest -Uri $loginUrl -Method POST -UseBasicParsing -Body $body -SessionVariable 'tempSession' -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri $loginUrl -Method POST -UseBasicParsing -Body $body `
+                -SessionVariable 'tempSession' -TimeoutSec $this.TimeoutSec -ErrorAction Stop
             $this.Session = $tempSession
             if ($response.Content -notmatch 'Action=Logout|/logout|Sair') {
                 throw "Login falhou - resposta nao contem indicador de sessao ativa."
@@ -279,10 +282,17 @@ class OtrsClient {
     }
 
     [string[]] GetActiveTicketIDs([string]$searchPath) {
+        Ensure-ZnunyParserRegexes
         $uri = "$($this.BaseURL)/$searchPath"
         $response = $this.InvokeWithRetry($uri)
-        $matches = [regex]::Matches($response.Content, 'TicketID=(\d+)')
-        return $matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+        $content = $this.GetResponseText($response)
+        $set = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($mm in $script:_RxTicketIdSearch.Matches($content)) {
+            [void]$set.Add($mm.Groups[1].Value)
+        }
+        $arr = New-Object string[] $set.Count
+        $set.CopyTo($arr)
+        return $arr
     }
 
     [string] GetTicketHtml([string]$ticketID) {
@@ -303,7 +313,7 @@ class OtrsClient {
         while ($attempt -le $this.RetryMax) {
             try {
                 $response = Invoke-WebRequest -Uri $uri -Method POST -Body $body `
-                    -Headers $headers -WebSession $this.Session -UseBasicParsing -ErrorAction Stop
+                    -Headers $headers -WebSession $this.Session -UseBasicParsing -TimeoutSec $this.TimeoutSec -ErrorAction Stop
                 return $this.GetResponseText($response)
             } catch {
                 $attempt++
@@ -344,6 +354,7 @@ class OtrsClient {
                     UseBasicParsing = $true
                     ErrorAction     = 'Stop'
                     Method          = $method
+                    TimeoutSec      = $this.TimeoutSec
                 }
                 if ($body) { $params.Body = $body }
                 return Invoke-WebRequest @params
@@ -411,7 +422,7 @@ class TicketCache {
         foreach ($key in $this.Data.Keys) {
             $obj[$key] = $this.Data[$key]
         }
-        $obj | ConvertTo-Json -Depth 6 | Out-File -FilePath $this.FilePath -Encoding UTF8
+        $obj | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $this.FilePath -Encoding UTF8
     }
 
     [void] Update([string]$id, [TicketData]$ticket) {
@@ -455,6 +466,29 @@ function Ensure-ZnunyParserRegexes {
     $script:_RxStripScript = [regex]::new('(?s)<script[^>]*>.*?</script>', $ro)
     $script:_RxStripTags = [regex]::new('<[^>]+>', $ro)
     $script:_RxStripWs = [regex]::new('\s+', $ro)
+    $script:_RxTicketIdSearch = [regex]::new('TicketID=(\d+)', $roIc)
+    $script:_RxTicketNumeroHdr = [regex]::new('Ticket#([0-9]+)', $roIc)
+    $script:_RxEstadoPill = [regex]::new('(?s)<span[^>]+class="[^"]*pill[^"]*"[^>]+title="([^"]+)"', $roIc)
+    $script:_RxEstadoLabel = [regex]::new('(?s)label[^>]*>\s*Estado:\s*[^<]*</label>\s*<span[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCriadoTitle = [regex]::new('(?s)label[^>]*>\s*Criado:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxLoginProbe = [regex]::new('Action=Login|name\s*=\s*"Password"|Login de Agente', $roIc)
+    $script:_RxN2Assign = [regex]::new('Analista designado[:\s]*@([\w\s]+)', $roIc)
+    $script:_RxFootEscreveu = [regex]::new('\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s*-\s*\S+@\S+\s+escreveu:.*$', $ro)
+    $script:_RxFootEmBlock = [regex]::new('\s*Em\s+\d{2}/\d{2}/\d{4}.*?escreveu:.*$', $ro)
+    $script:_RxUnidadeAltUsuario = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxUnidadeAltCodCliente = [regex]::new('(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $tokList = [System.Collections.Generic.List[regex]]::new()
+    foreach ($tp in @(
+            'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
+            'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
+            '"ChallengeToken",\s*"([A-Za-z0-9]+)"',
+            'ChallengeToken=([A-Za-z0-9]{16,})',
+            'data-challenge-token="([A-Za-z0-9]+)"',
+            'ChallengeToken:\s*"([A-Za-z0-9]+)"'
+        )) {
+        try { $tokList.Add([regex]::new($tp, $roIc)) } catch { }
+    }
+    $script:_RxChallengeTokens = $tokList
     $script:_ZnunyRxReady = $true
 }
 
@@ -470,7 +504,8 @@ function Get-ArticleBodyChunk {
 function Test-ArticleRawLooksLikeLoginPage {
     param([string]$Raw)
     if (-not $Raw) { return $true }
-    return $Raw -match 'Action=Login|name\s*=\s*"Password"|Login de Agente'
+    Ensure-ZnunyParserRegexes
+    return $script:_RxLoginProbe.IsMatch($Raw)
 }
 
 function Remove-Html {
@@ -639,30 +674,22 @@ function Get-TicketDataFromHtml {
         [int]$sleepMs
     )
 
-    if (($m = [regex]::Match($HTML, 'Ticket#([0-9]+)')).Success) { $numero = $m.Groups[1].Value } else { $numero = 'N/D' }
-    if (($m = [regex]::Match($HTML, '(?s)<span[^>]+class="[^"]*pill[^"]*"[^>]+title="([^"]+)"')).Success) { $estado = $m.Groups[1].Value }
-    elseif (($m = [regex]::Match($HTML, '(?s)label[^>]*>\s*Estado:\s*[^<]*</label>\s*<span[^>]+title="([^"]+)"')).Success) { $estado = $m.Groups[1].Value }
+    Ensure-ZnunyParserRegexes
+    if (($m = $script:_RxTicketNumeroHdr.Match($HTML)).Success) { $numero = $m.Groups[1].Value } else { $numero = 'N/D' }
+    if (($m = $script:_RxEstadoPill.Match($HTML)).Success) { $estado = $m.Groups[1].Value }
+    elseif (($m = $script:_RxEstadoLabel.Match($HTML)).Success) { $estado = $m.Groups[1].Value }
     else { $estado = 'N/D' }
-    if (($m = [regex]::Match($HTML, '(?s)label[^>]*>\s*Criado:\s*</label>\s*<p[^>]+title="([^"]+)"')).Success) { $criado = $m.Groups[1].Value } else { $criado = 'N/D' }
+    if (($m = $script:_RxCriadoTitle.Match($HTML)).Success) { $criado = $m.Groups[1].Value } else { $criado = 'N/D' }
 
     # Cliente/Unidade a partir do HTML principal (sem HTTP extra).
     $cliente = Get-CustomerNameFromHtml $HTML
     $unidade = Get-CustomerUnitFromHtml $HTML
 
-    $tokenPatterns = @(
-        'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
-        'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
-        '"ChallengeToken",\s*"([A-Za-z0-9]+)"',
-        'ChallengeToken=([A-Za-z0-9]{{16,}})',
-        'data-challenge-token="([A-Za-z0-9]+)"',
-        'ChallengeToken:\s*"([A-Za-z0-9]+)"'
-    )
-
     $widgetHtml = ''
     if (($cliente -eq 'N/D' -or $unidade -eq 'N/D') -and $client) {
         $token = ''
-        foreach ($tp in $tokenPatterns) {
-            if (($m = [regex]::Match($HTML, $tp)).Success) {
+        foreach ($rxTok in $script:_RxChallengeTokens) {
+            if (($m = $rxTok.Match($HTML)).Success) {
                 $token = $m.Groups[1].Value
                 Write-Verbose "ChallengeToken encontrado (ticket $ticketID): $token"
                 break
@@ -695,19 +722,13 @@ function Get-TicketDataFromHtml {
         Write-Verbose "Unidade igual ao Cliente, tentando campo alternativo..."
         $searchSrc = $widgetHtml + $HTML
 
-        $patternAlt1 = @'
-(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($searchSrc, $patternAlt1)).Success) {
+        if (($m = $script:_RxUnidadeAltUsuario.Match($searchSrc)).Success) {
             $alt = $m.Groups[1].Value.Trim()
             if ($alt -and $alt -notmatch '@') { $unidade = $alt }
         }
-        else {
-            $patternAlt2 = '(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"'
-            if (($m = [regex]::Match($searchSrc, $patternAlt2)).Success) {
-                $alt = $m.Groups[1].Value.Trim()
-                if ($alt) { $unidade = $alt }
-            }
+        elseif (($m = $script:_RxUnidadeAltCodCliente.Match($searchSrc)).Success) {
+            $alt = $m.Groups[1].Value.Trim()
+            if ($alt) { $unidade = $alt }
         }
         Write-Verbose "Apos ajuste: Cliente=$cliente, Unidade=$unidade"
     }
@@ -784,12 +805,12 @@ function Get-TicketDataFromHtml {
             if (-not $body) { continue }
             $text = Remove-Html $body
 
-            if (($am = [regex]::Match($text, 'Analista designado[:\s]*@([\w\s]+)')).Success) {
+            if (($am = $script:_RxN2Assign.Match($text)).Success) {
                 $text = "Em tratativas com N2 @$($am.Groups[1].Value.Trim())"
             }
-            $text = $text -replace '\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s*-\s*\S+@\S+\s+escreveu:.*$', ''
-            $text = $text -replace '\s*Em\s+\d{2}/\d{2}/\d{4}.*?escreveu:.*$', ''
-            $text = ($text -replace '\s+', ' ').Trim()
+            $text = $script:_RxFootEscreveu.Replace($text, '')
+            $text = $script:_RxFootEmBlock.Replace($text, '')
+            $text = $script:_RxStripWs.Replace($text, ' ').Trim()
 
             if ($text.Length -ge 5 -and -not (Test-AutoNote $text)) {
                 $articles.Add([PSCustomObject]@{ Date = $adate; Text = $text })
