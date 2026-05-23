@@ -110,6 +110,9 @@ function Load-Config {
         OutputPath      = $PWD.Path
         SearchPath      = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
         HubBaseURL      = 'http://172.16.0.49:3210'
+        # Credenciais Hub — preenchimento automatico na sincronizacao (texto claro: nao commitar em repo publico).
+        HubEmail        = 'thiago.ratanaka@microset.net.br'
+        HubPassword     = 'SenhaN2M7@'
         SleepArticleMs  = 5
         SleepTicketMs   = 15
     }
@@ -123,6 +126,8 @@ function Load-Config {
             if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
             if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
             if ($j.HubBaseURL)  { $cfg.HubBaseURL  = $j.HubBaseURL  }
+            if ($j.HubEmail)    { $cfg.HubEmail    = $j.HubEmail    }
+            if ($j.HubPassword) { $cfg.HubPassword = $j.HubPassword }
             if ($null -ne $j.SleepArticleMs) { $cfg.SleepArticleMs = [int]$j.SleepArticleMs }
             if ($null -ne $j.SleepTicketMs)  { $cfg.SleepTicketMs  = [int]$j.SleepTicketMs  }
         } catch { }
@@ -140,6 +145,8 @@ function Save-Config {
         OutputPath      = $Cfg.OutputPath
         SearchPath      = $Cfg.SearchPath
         HubBaseURL      = $Cfg.HubBaseURL
+        HubEmail        = $(if ($null -ne $Cfg.HubEmail) { $Cfg.HubEmail } else { '' })
+        HubPassword     = $(if ($null -ne $Cfg.HubPassword) { $Cfg.HubPassword } else { '' })
         SleepArticleMs  = $(if ($null -ne $Cfg.SleepArticleMs) { [int]$Cfg.SleepArticleMs } else { 5 })
         SleepTicketMs   = $(if ($null -ne $Cfg.SleepTicketMs)  { [int]$Cfg.SleepTicketMs  } else { 15 })
     } | ConvertTo-Json -Compress | Out-File $Path -Encoding UTF8
@@ -2002,11 +2009,21 @@ function Invoke-SyncHub {
     # Credenciais do Hub
     $hubDefault = if ($Cfg.HubBaseURL) { $Cfg.HubBaseURL } else { 'http://172.16.0.49:3210' }
     $hubUrl   = Read-Field "URL do Hub" $hubDefault
-    $hubEmail = Read-Field "Email Hub"  ""
-    Write-Host "  Senha Hub: " -ForegroundColor Yellow -NoNewline
+    $defEmail = if ($Cfg.HubEmail) { [string]$Cfg.HubEmail } else { '' }
+    $hubEmail = Read-Field "Email Hub" $defEmail
+    Write-Host "  Senha Hub [Enter = usar senha salva no script/config]: " -ForegroundColor Yellow -NoNewline
     $hubPass = Read-Host
+    if ([string]::IsNullOrWhiteSpace($hubPass)) {
+        $hubPass = if ($Cfg.HubPassword) { [string]$Cfg.HubPassword } else { '' }
+    }
     $hubUrl = $hubUrl.TrimEnd('/')
     Write-Host ""
+
+    if ([string]::IsNullOrWhiteSpace($hubEmail) -or [string]::IsNullOrWhiteSpace($hubPass)) {
+        Write-Err "Email ou senha Hub vazios. Ajuste em Configuracoes (opcao 5) ou nos padroes em Load-Config."
+        Pause-Screen
+        return
+    }
 
     # Login
     Write-Info "Conectando ao Hub..."
@@ -2179,6 +2196,12 @@ function Show-Configuracoes {
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
     if (-not $Cfg.HubBaseURL) { $Cfg.HubBaseURL = 'http://172.16.0.49:3210' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
+    if ($null -eq $Cfg.HubEmail) { $Cfg.HubEmail = '' }
+    $Cfg.HubEmail = Read-Field "Email Hub (login relatorio)" $Cfg.HubEmail
+    Write-Host "  Senha Hub [Enter = manter atual]: " -ForegroundColor Yellow -NoNewline
+    $hubPwNew = Read-Host
+    if ($hubPwNew) { $Cfg.HubPassword = $hubPwNew }
+    elseif ($null -eq $Cfg.HubPassword) { $Cfg.HubPassword = '' }
     if ($null -eq $Cfg.SleepArticleMs) { $Cfg.SleepArticleMs = 5 }
     if ($null -eq $Cfg.SleepTicketMs)  { $Cfg.SleepTicketMs  = 15 }
     $Cfg.SleepArticleMs = [int](Read-Field "Pausa entre notas ao exportar (ms, 0=sem)" $Cfg.SleepArticleMs.ToString())
