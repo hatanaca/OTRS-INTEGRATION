@@ -1092,13 +1092,27 @@ function Show-NormalizacaoAlert {
 function Get-LiveTickets {
     param([hashtable]$Cfg)
     $client = [OtrsClient]::new($Cfg.BaseURL, 45)
-    $client.Login($Cfg.Username, $Cfg.Password)
-    $ids = $client.GetActiveTicketIDs($Cfg.SearchPath)
-    $list = [System.Collections.Generic.List[object]]::new()
-    foreach ($id in $ids) {
-        try { $list.Add((Get-TicketDataFromHtml $client $id $false)) } catch { }
+    try {
+        $client.Login($Cfg.Username, $Cfg.Password)
+        $ids = $client.GetActiveTicketIDs($Cfg.SearchPath)
+        $list = [System.Collections.Generic.List[object]]::new()
+        foreach ($id in $ids) {
+            try {
+                $html   = $client.GetTicketHtml($id)
+                $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $id -client $client `
+                    -maxArticles 9999 -fetchLimit 9999 -sleepMs 50
+                if ($null -ne $ticket -and $ticket.Articles.Count -gt 4) {
+                    $short = [System.Collections.Generic.List[object]]::new()
+                    for ($i = 0; $i -lt 4; $i++) { $short.Add($ticket.Articles[$i]) }
+                    $ticket = [TicketData]::new($ticket.Numero, $ticket.Estado, $ticket.Criado, $ticket.Cliente, $ticket.Unidade, $short)
+                }
+                $list.Add($ticket)
+            } catch { }
+        }
+        return @($list)
+    } finally {
+        $client.Logout()
     }
-    return @($list)
 }
 
 # =============================================================================
