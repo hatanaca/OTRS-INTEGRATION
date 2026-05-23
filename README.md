@@ -16,6 +16,19 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
 | `EstadoFile` | Arquivo JSON de cache (estado dos chamados) |
 | `OutputPath` | Pasta de saída dos relatórios |
 | `HubBaseURL` | URL base do Hub (ex.: `http://172.16.0.49:3210`) para opção de sincronização |
+| `SleepArticleMs` | Pausa entre cada download de nota na exportação (opções 1/2). **0** = sem pausa. Padrão: **5** |
+| `SleepTicketMs` | Pausa entre um chamado e outro na exportação. **0** = sem pausa. Padrão: **15** |
+
+### Desempenho
+
+- **Exportação (opções 1 e 2):** pausas configuráveis (`SleepArticleMs` / `SleepTicketMs`, padrão **5** e **15** ms). Use **0** se o OTRS aceitar. `Write-Progress` usa intervalo adaptativo (menos atualizações em listas grandes). Requisições HTTP em falha usam backoff exponencial mais curto.
+- **Widget de cliente:** se **nome do cliente** e **unidade** já aparecem no HTML do TicketZoom, o script **não** chama o AJAX `CustomerInformation` (uma requisição a menos por chamado).
+- **Corpo do artigo:** no **primeiro** artigo de cada chamado o script tenta `Subaction=Plain` (menos HTML); se a resposta for curta, parecer login ou vazia, passa a usar `HTMLView` para **todos** os artigos daquele chamado. `GetResponseText` usa `response.Content` quando existir (evita copiar o stream inteiro).
+- **Regex compilados:** linhas da tabela de artigos, remoção de tags em `Remove-Html` e extração de `<body>` reutilizam instâncias `[regex]` com opção `Compiled`.
+- **Filtro de notas automáticas:** padrões `AutoNotePatterns` também são compilados uma vez (`Test-AutoNote`).
+- **Leitura de notas:** respeita `MaxArticles` / `FetchLimit`; no menu permanecem em **9999** (relatório completo), exceto no visualizador tempo real com limite de 4 notas.
+- **Visualizador tempo real (4 notas):** busca só o necessário (ordena por data, para cedo), sem pausa entre notas.
+- **Sessão OTRS no visualizador:** um único login até sair com `[Q]`.
 
 ## Menu principal
 
@@ -25,8 +38,10 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
    - **OTRS tempo real (4 notas)** — Atualização a cada 60 s; apenas as **quatro notas mais recentes** por chamado (consulta direta ao OTRS).
    - **OTRS tempo real (todas)** — Mesmo fluxo em tempo real, porém com **todas as notas** de cada chamado ativo (mais lento).
    - **Cache local** — Último JSON gerado, sem consultar o OTRS; rolagem livre das notas.
+
+Nos dois modos **OTRS em tempo real**, o script usa **uma única sessão**: faz **login uma vez** ao abrir o visualizador, reutiliza os cookies em cada atualização (automática a cada 60 s ou tecla `[R]`) e só faz **logout** ao sair com `[Q]`, reduzindo avisos de excesso de logins no Znuny/OTRS. Se a sessão expirar, há **uma tentativa de novo login** antes de desistir daquela atualização.
 4. **Alterar credenciais** — OTRS.
-5. **Configurações** — Inclui URL do Hub.
+5. **Configurações** — Busca, cache, Hub e pausas de exportação.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
 7. **Sincronizar com Hub** — Login em `/api/login` (JSON); leitura de `/api/relatorio`; criação (`POST /api/relatorio`) ou atualização (`PUT /api/relatorio/{numero}`) com **confirmação do operador** em cada alteração.
 

@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Menu-OTRS.ps1 - Interface TUI para relatorios CCO (Znuny/OTRS)
 # Versao unificada - Export-CcoReport incorporado
 # Compativel com Windows PowerShell 5.1 e PowerShell 7+
@@ -103,13 +103,18 @@ function Pause-Screen {
 function Load-Config {
     param([string]$Path)
     $cfg = @{
-        BaseURL     = 'http://172.16.0.12/znuny'
-        Username    = ''
-        Password    = ''
-        EstadoFile  = 'estado_chamados.json'
-        OutputPath  = $PWD.Path
-        SearchPath  = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
-        HubBaseURL  = 'http://172.16.0.49:3210'
+        BaseURL         = 'http://172.16.0.12/znuny'
+        Username        = ''
+        Password        = ''
+        EstadoFile      = 'estado_chamados.json'
+        OutputPath      = $PWD.Path
+        SearchPath      = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
+        HubBaseURL      = 'http://172.16.0.49:3210'
+        # Credenciais Hub - preenchimento automatico na sincronizacao (texto claro: nao commitar em repo publico).
+        HubEmail        = 'thiago.ratanaka@microset.net.br'
+        HubPassword     = 'SenhaN2M7@'
+        SleepArticleMs  = 5
+        SleepTicketMs   = 15
     }
     if (Test-Path $Path) {
         try {
@@ -121,6 +126,10 @@ function Load-Config {
             if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
             if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
             if ($j.HubBaseURL)  { $cfg.HubBaseURL  = $j.HubBaseURL  }
+            if ($j.HubEmail)    { $cfg.HubEmail    = $j.HubEmail    }
+            if ($j.HubPassword) { $cfg.HubPassword = $j.HubPassword }
+            if ($null -ne $j.SleepArticleMs) { $cfg.SleepArticleMs = [int]$j.SleepArticleMs }
+            if ($null -ne $j.SleepTicketMs)  { $cfg.SleepTicketMs  = [int]$j.SleepTicketMs  }
         } catch { }
     }
     return $cfg
@@ -129,14 +138,18 @@ function Load-Config {
 function Save-Config {
     param([hashtable]$Cfg, [string]$Path)
     [ordered]@{
-        BaseURL     = $Cfg.BaseURL
-        Username    = $Cfg.Username
-        Password    = $Cfg.Password
-        EstadoFile  = $Cfg.EstadoFile
-        OutputPath  = $Cfg.OutputPath
-        SearchPath  = $Cfg.SearchPath
-        HubBaseURL  = $Cfg.HubBaseURL
-    } | ConvertTo-Json | Out-File $Path -Encoding UTF8
+        BaseURL         = $Cfg.BaseURL
+        Username        = $Cfg.Username
+        Password        = $Cfg.Password
+        EstadoFile      = $Cfg.EstadoFile
+        OutputPath      = $Cfg.OutputPath
+        SearchPath      = $Cfg.SearchPath
+        HubBaseURL      = $Cfg.HubBaseURL
+        HubEmail        = $(if ($null -ne $Cfg.HubEmail) { $Cfg.HubEmail } else { '' })
+        HubPassword     = $(if ($null -ne $Cfg.HubPassword) { $Cfg.HubPassword } else { '' })
+        SleepArticleMs  = $(if ($null -ne $Cfg.SleepArticleMs) { [int]$Cfg.SleepArticleMs } else { 5 })
+        SleepTicketMs   = $(if ($null -ne $Cfg.SleepTicketMs)  { [int]$Cfg.SleepTicketMs  } else { 15 })
+    } | ConvertTo-Json -Compress | Out-File $Path -Encoding UTF8
 }
 
 function Get-CfgStatus {
@@ -243,10 +256,12 @@ class OtrsClient {
     [string]$BaseURL
     [object]$Session
     [int]$RetryMax
+    [int]$TimeoutSec
 
     OtrsClient([string]$baseUrl, [int]$retryMax = 3) {
-        $this.BaseURL  = $baseUrl.TrimEnd('/')
-        $this.RetryMax = $retryMax
+        $this.BaseURL    = $baseUrl.TrimEnd('/')
+        $this.RetryMax   = $retryMax
+        $this.TimeoutSec = 120
     }
 
     [void] Login([string]$user, [string]$pass) {
@@ -254,7 +269,8 @@ class OtrsClient {
         $body = @{ Action='Login'; RequestedURL=''; Lang='pt_BR'; TimeOffset='-180'; User=$user; Password=$pass }
         try {
             $tempSession = $null
-            $response = Invoke-WebRequest -Uri $loginUrl -Method POST -UseBasicParsing -Body $body -SessionVariable 'tempSession' -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri $loginUrl -Method POST -UseBasicParsing -Body $body `
+                -SessionVariable 'tempSession' -TimeoutSec $this.TimeoutSec -ErrorAction Stop
             $this.Session = $tempSession
             if ($response.Content -notmatch 'Action=Logout|/logout|Sair') {
                 throw "Login falhou - resposta nao contem indicador de sessao ativa."
@@ -273,10 +289,17 @@ class OtrsClient {
     }
 
     [string[]] GetActiveTicketIDs([string]$searchPath) {
+        Ensure-ZnunyParserRegexes
         $uri = "$($this.BaseURL)/$searchPath"
         $response = $this.InvokeWithRetry($uri)
-        $matches = [regex]::Matches($response.Content, 'TicketID=(\d+)')
-        return $matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+        $content = $this.GetResponseText($response)
+        $set = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($mm in $script:_RxTicketIdSearch.Matches($content)) {
+            [void]$set.Add($mm.Groups[1].Value)
+        }
+        $arr = New-Object string[] $set.Count
+        $set.CopyTo($arr)
+        return $arr
     }
 
     [string] GetTicketHtml([string]$ticketID) {
@@ -297,22 +320,27 @@ class OtrsClient {
         while ($attempt -le $this.RetryMax) {
             try {
                 $response = Invoke-WebRequest -Uri $uri -Method POST -Body $body `
-                    -Headers $headers -WebSession $this.Session -UseBasicParsing -ErrorAction Stop
+                    -Headers $headers -WebSession $this.Session -UseBasicParsing -TimeoutSec $this.TimeoutSec -ErrorAction Stop
                 return $this.GetResponseText($response)
             } catch {
                 $attempt++
                 if ($attempt -gt $this.RetryMax) { throw }
-                Start-Sleep -Milliseconds (200 * $attempt)
+                $waitMs = [Math]::Min(1200, 50 * [int][Math]::Pow(2, $attempt - 1))
+                Start-Sleep -Milliseconds $waitMs
                 Write-Verbose "Retry $attempt/$($this.RetryMax) para widget CustomerInformation (ticket $ticketID)"
             }
         }
         return ''
     }
 
-    [string] GetArticleContent([string]$ticketID, [string]$articleID) {
-        $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketArticleContent;Subaction=HTMLView;TicketID=$ticketID;ArticleID=$articleID;FileID=;"
+    [string] GetArticleRaw([string]$ticketID, [string]$articleID, [string]$subaction) {
+        $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketArticleContent;Subaction=$subaction;TicketID=$ticketID;ArticleID=$articleID;FileID=;"
         $response = $this.InvokeWithRetry($uri)
         return $this.GetResponseText($response)
+    }
+
+    [string] GetArticleContent([string]$ticketID, [string]$articleID) {
+        return $this.GetArticleRaw($ticketID, $articleID, 'HTMLView')
     }
 
     hidden [object] InvokeWithRetry([string]$uri) {
@@ -333,13 +361,15 @@ class OtrsClient {
                     UseBasicParsing = $true
                     ErrorAction     = 'Stop'
                     Method          = $method
+                    TimeoutSec      = $this.TimeoutSec
                 }
                 if ($body) { $params.Body = $body }
                 return Invoke-WebRequest @params
             } catch {
                 $attempt++
                 if ($attempt -gt $this.RetryMax) { throw }
-                Start-Sleep -Milliseconds (200 * $attempt)
+                $waitMs = [Math]::Min(1200, 50 * [int][Math]::Pow(2, $attempt - 1))
+                Start-Sleep -Milliseconds $waitMs
                 Write-Verbose "Retry $attempt/$($this.RetryMax) para $uri"
             }
         }
@@ -347,7 +377,11 @@ class OtrsClient {
     }
 
     hidden [string] GetResponseText($response) {
-        if (-not $response -or -not $response.RawContentStream) { return '' }
+        if (-not $response) { return '' }
+        # Preferir Content (string ja materializada) - mais rapido que ler RawContentStream inteiro.
+        $c = $response.Content
+        if ($null -ne $c -and $c.Length -gt 0) { return [string]$c }
+        if (-not $response.RawContentStream) { return '' }
         return [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
     }
 }
@@ -372,9 +406,11 @@ class TicketCache {
                 $v = $prop.Value
                 $notas = @()
                 if ($v.Notas) {
+                    $nl = [System.Collections.Generic.List[object]]::new()
                     foreach ($n in $v.Notas) {
-                        $notas += [PSCustomObject]@{ Date = $n.Date; Text = $n.Text }
+                        $nl.Add([PSCustomObject]@{ Date = $n.Date; Text = $n.Text })
                     }
+                    $notas = $nl.ToArray()
                 }
                 $this.Data[$prop.Name] = @{
                     Estado   = $v.Estado
@@ -395,7 +431,7 @@ class TicketCache {
         foreach ($key in $this.Data.Keys) {
             $obj[$key] = $this.Data[$key]
         }
-        $obj | ConvertTo-Json -Depth 6 | Out-File -FilePath $this.FilePath -Encoding UTF8
+        $obj | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $this.FilePath -Encoding UTF8
     }
 
     [void] Update([string]$id, [TicketData]$ticket) {
@@ -425,67 +461,227 @@ class TicketCache {
 # =============================================================================
 # Funcoes de extracao
 # =============================================================================
+
+function Ensure-ZnunyParserRegexes {
+    if ($script:_ZnunyRxReady) { return }
+    $ro = [System.Text.RegularExpressions.RegexOptions]::Compiled -bor
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $roIc = $ro -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    $script:_RxTrArticleRows = [regex]::new('(?s)<tr[^>]*id="Row\d+"[^>]*>(.*?)</tr>', $ro)
+    $script:_RxArtIdInRow = [regex]::new('<input[^>]+class="ArticleID"[^>]+value="(\d+)"', $roIc)
+    $script:_RxArtDateInRow = [regex]::new('<td class="Created">[^<]*<div title="([^"]+)"', $ro)
+    $script:_RxArtDateSortKey = [regex]::new('^(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})', $ro)
+    $script:_RxArtBody = [regex]::new('(?s)<body[^>]*>(.*)</body>', $roIc)
+    $script:_RxStripStyle = [regex]::new('(?s)<style[^>]*>.*?</style>', $ro)
+    $script:_RxStripScript = [regex]::new('(?s)<script[^>]*>.*?</script>', $ro)
+    $script:_RxStripTags = [regex]::new('<[^>]+>', $ro)
+    $script:_RxStripWs = [regex]::new('\s+', $ro)
+    $script:_RxTicketIdSearch = [regex]::new('TicketID=(\d+)', $roIc)
+    $script:_RxTicketNumeroHdr = [regex]::new('Ticket#([0-9]+)', $roIc)
+    $script:_RxEstadoPill = [regex]::new('(?s)<span[^>]+class="[^"]*pill[^"]*"[^>]+title="([^"]+)"', $roIc)
+    $script:_RxEstadoLabel = [regex]::new('(?s)label[^>]*>\s*Estado:\s*[^<]*</label>\s*<span[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCriadoTitle = [regex]::new('(?s)label[^>]*>\s*Criado:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxLoginProbe = [regex]::new('Action=Login|name\s*=\s*"Password"|Login de Agente', $roIc)
+    $script:_RxN2Assign = [regex]::new('Analista designado[:\s]*@([\w\s]+)', $roIc)
+    $script:_RxFootEscreveu = [regex]::new('\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s*-\s*\S+@\S+\s+escreveu:.*$', $ro)
+    $script:_RxFootEmBlock = [regex]::new('\s*Em\s+\d{2}/\d{2}/\d{4}.*?escreveu:.*$', $ro)
+    $script:_RxUnidadeAltUsuario = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $tokList = [System.Collections.Generic.List[regex]]::new()
+    foreach ($tp in @(
+            'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
+            'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
+            '"ChallengeToken",\s*"([A-Za-z0-9]+)"',
+            'ChallengeToken=([A-Za-z0-9]{16,})',
+            'data-challenge-token="([A-Za-z0-9]+)"',
+            'ChallengeToken:\s*"([A-Za-z0-9]+)"'
+        )) {
+        try { $tokList.Add([regex]::new($tp, $roIc)) } catch { }
+    }
+    $script:_RxChallengeTokens = $tokList
+
+    # Cliente / unidade (HTML principal e widget) - evita [regex]::Match repetido por ticket
+    $script:_RxCustNomeTitle = [regex]::new('(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCustNomeP = [regex]::new('(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxCustNomeSuffixTail = [regex]::new('\s*-\s*\d+\s*$', $ro)
+    $script:_RxCustIdCliTitle = [regex]::new('(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCustIdCliA = [regex]::new('(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<a[^>]*>([^<]+)</a>', $roIc)
+    $script:_RxCustClienteTitle = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
+    $script:_RxCustClienteP = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxUnitUsuarioP = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
+    $script:_RxHtmlTagProbe = [regex]::new('<[a-zA-Z!/]', $ro)
+    $dynT = [System.Collections.Generic.List[regex]]::new()
+    $dynP = [System.Collections.Generic.List[regex]]::new()
+    foreach ($lb in @(
+            'Unidade',
+            'Loja',
+            'Filial',
+            'Campo\s*do\s*[Cc]liente',
+            'Custom\s?[Uu]ser',
+            'Customer\s?[Uu]ser'
+        )) {
+        $dynT.Add([regex]::new("(?s)<label[^>]*>\s*$lb\s*:\s*</label>\s*<p[^>]+title=`"([^`"]+)`"", $roIc))
+        $dynP.Add([regex]::new("(?s)<label[^>]*>\s*$lb\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>", $roIc))
+    }
+    $script:_RxUnitDynamicTitles = $dynT
+    $script:_RxUnitDynamicPs = $dynP
+    $script:_ZnunyRxReady = $true
+}
+
+function Get-ArticleBodyChunk {
+    param([string]$Raw)
+    if (-not $Raw) { return '' }
+    Ensure-ZnunyParserRegexes
+    if (($m = $script:_RxArtBody.Match($Raw)).Success) { return $m.Groups[1].Value.Trim() }
+    if (-not $script:_RxHtmlTagProbe.IsMatch($Raw)) { return $Raw.Trim() }
+    return ''
+}
+
+function Test-ArticleRawLooksLikeLoginPage {
+    param([string]$Raw)
+    if (-not $Raw) { return $true }
+    Ensure-ZnunyParserRegexes
+    return $script:_RxLoginProbe.IsMatch($Raw)
+}
+
 function Remove-Html {
     param([string]$Text)
     if (-not $Text) { return '' }
+    Ensure-ZnunyParserRegexes
     try {
-        $Text = $Text -replace '(?s)<style[^>]*>.*?</style>', ''
-        $Text = $Text -replace '(?s)<script[^>]*>.*?</script>', ''
-        $Text = $Text -replace '<[^>]+>', ''
+        $Text = $script:_RxStripStyle.Replace($Text, '')
+        $Text = $script:_RxStripScript.Replace($Text, '')
+        $Text = $script:_RxStripTags.Replace($Text, '')
         $Text = [System.Net.WebUtility]::HtmlDecode($Text)
     } catch {
         Write-Warning "Erro ao decodificar HTML: $_"
     }
-    return ($Text -replace '\s+', ' ').Trim()
+    return $script:_RxStripWs.Replace($Text, ' ').Trim()
 }
 
 function Get-CustomerNameFromHtml {
     param([string]$HTML)
+    Ensure-ZnunyParserRegexes
 
-    $pattern1 = @'
-(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-    if (($m = [regex]::Match($HTML, $pattern1)).Success) {
+    if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val) {
-            $val = $val -replace '\s*-\s*\d+\s*$', ''
-            return $val.Trim()
+            return $script:_RxCustNomeSuffixTail.Replace($val, '').Trim()
         }
     }
-    $pattern1b = @'
-(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>
-'@
-    if (($m = [regex]::Match($HTML, $pattern1b)).Success) {
+    if (($m = $script:_RxCustNomeP.Match($HTML)).Success) {
         $val = (Remove-Html $m.Groups[1].Value).Trim()
         if ($val) {
-            $val = $val -replace '\s*-\s*\d+\s*$', ''
-            return $val.Trim()
+            return $script:_RxCustNomeSuffixTail.Replace($val, '').Trim()
         }
     }
 
-    $pattern2 = @'
-(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-    if (($m = [regex]::Match($HTML, $pattern2)).Success) {
+    if (($m = $script:_RxCustIdCliTitle.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val) { return $val }
     }
-    if (($m = [regex]::Match($HTML, '(?s)<label[^>]*>\s*ID do Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<a[^>]*>([^<]+)</a>')).Success) {
+    if (($m = $script:_RxCustIdCliA.Match($HTML)).Success) {
         return $m.Groups[1].Value.Trim()
     }
 
-    $pattern3 = @'
-(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-    if (($m = [regex]::Match($HTML, $pattern3)).Success) {
+    if (($m = $script:_RxCustClienteTitle.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val) { return $val }
     }
-    if (($m = [regex]::Match($HTML, '(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>')).Success) {
+    if (($m = $script:_RxCustClienteP.Match($HTML)).Success) {
         $val = (Remove-Html $m.Groups[1].Value).Trim()
         if ($val) { return $val }
     }
     return 'N/D'
+}
+
+# Texto util para "Campo do cliente" / unidade: evita codigo numerico puro (CodigoCliente) sem descricao.
+function Test-UnidadeTextoUtil {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $t = $Text.Trim()
+    if ($t.Length -lt 2) { return $false }
+    if ($t -match '^\d+$') { return $false }
+    if ($t -match '[\p{L}]') { return $true }
+    if ($t -match '(?i)(loja|filial|unidade|matriz|agencia|predio|sala|andar)') { return $true }
+    return $false
+}
+
+# Ex.: "ROYAL FIC - UNIDADE 50 - PORTO NACIONAL - 27163" -> "ROYAL FIC - UNIDADE 50 - PORTO NACIONAL" (remove codigo final)
+function Get-UnidadeFromNomeClienteString {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($seg in ($Text.Trim() -split '\s*-\s*')) {
+        $s = $seg.Trim()
+        if ($s) { $parts.Add($s) }
+    }
+    while ($parts.Count -gt 1) {
+        $last = $parts[$parts.Count - 1]
+        if ($last -match '^\d+$') { $parts.RemoveAt($parts.Count - 1) }
+        else { break }
+    }
+    if ($parts.Count -eq 0) { return '' }
+    $out = [string]::Join(' - ', $parts).Trim()
+    if (Test-UnidadeTextoUtil $out) { return $out }
+    return ''
+}
+
+function Get-UnidadeFromNomeClienteHtml {
+    param(
+        [string]$HTML,
+        [string]$ExcludeEqualTo = $null
+    )
+    Ensure-ZnunyParserRegexes
+    $raw = ''
+    if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
+        $raw = $m.Groups[1].Value.Trim()
+    }
+    elseif (($m = $script:_RxCustNomeP.Match($HTML)).Success) {
+        $raw = (Remove-Html $m.Groups[1].Value).Trim()
+    }
+    if (-not $raw) { return '' }
+    $u = Get-UnidadeFromNomeClienteString $raw
+    if (-not $u) { return '' }
+    if ($ExcludeEqualTo -and ($u -eq $ExcludeEqualTo.Trim())) { return '' }
+    return $u
+}
+
+function Try-MatchUnidadeDescriptive {
+    param(
+        [string]$HTML,
+        [string]$ExcludeEqualTo = $null
+    )
+    if ([string]::IsNullOrWhiteSpace($HTML)) { return '' }
+    Ensure-ZnunyParserRegexes
+    for ($ui = 0; $ui -lt $script:_RxUnitDynamicTitles.Count; $ui++) {
+        if (($m = $script:_RxUnitDynamicTitles[$ui].Match($HTML)).Success) {
+            $val = $m.Groups[1].Value.Trim()
+            if (-not (Test-UnidadeTextoUtil $val)) { continue }
+            if ($ExcludeEqualTo -and ($val -eq $ExcludeEqualTo.Trim())) { continue }
+            return $val
+        }
+        if (($m = $script:_RxUnitDynamicPs[$ui].Match($HTML)).Success) {
+            $val = (Remove-Html $m.Groups[1].Value).Trim()
+            if (-not (Test-UnidadeTextoUtil $val)) { continue }
+            if ($ExcludeEqualTo -and ($val -eq $ExcludeEqualTo.Trim())) { continue }
+            return $val
+        }
+    }
+    $fromNome = Get-UnidadeFromNomeClienteHtml $HTML $ExcludeEqualTo
+    if ($fromNome) { return $fromNome }
+    if (($m = $script:_RxUnidadeAltUsuario.Match($HTML)).Success) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and $val -notmatch '@' -and (Test-UnidadeTextoUtil $val)) {
+            if (-not $ExcludeEqualTo -or ($val -ne $ExcludeEqualTo.Trim())) { return $val }
+        }
+    }
+    if (($m = $script:_RxUnitUsuarioP.Match($HTML)).Success) {
+        $val = (Remove-Html $m.Groups[1].Value).Trim()
+        if ($val -and $val -notmatch '@' -and (Test-UnidadeTextoUtil $val)) {
+            if (-not $ExcludeEqualTo -or ($val -ne $ExcludeEqualTo.Trim())) { return $val }
+        }
+    }
+    return ''
 }
 
 function Get-CustomerUnitFromHtml {
@@ -494,75 +690,31 @@ function Get-CustomerUnitFromHtml {
         [switch]$FallbackOnly
     )
 
-    if (-not $FallbackOnly) {
-
-        $patternCod = @'
-(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($HTML, $patternCod)).Success) {
-            $val = $m.Groups[1].Value.Trim()
-            if ($val) { return $val }
-        }
-        if (($m = [regex]::Match($HTML, '(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>')).Success) {
-            $val = (Remove-Html $m.Groups[1].Value).Trim()
-            if ($val) { return $val }
-        }
-
-        # Usuario: (login)
-        $patternUser = @'
-(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($HTML, $patternUser)).Success) {
-            $val = $m.Groups[1].Value.Trim()
-            if ($val -and $val -notmatch '@') { return $val }
-        }
-        $patternUser2 = @'
-(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>
-'@
-        if (($m = [regex]::Match($HTML, $patternUser2)).Success) {
-            $val = (Remove-Html $m.Groups[1].Value).Trim()
-            if ($val -and $val -notmatch '@') { return $val }
-        }
-
-        # Outros labels
-        $unitLabels = @(
-            'Unidade',
-            'Loja',
-            'C\s*o\s*d\s*i\s*g\s*o\s*Cliente',
-            'Custom\s?[Uu]ser',
-            'Customer\s?[Uu]ser'
-        )
-        foreach ($label in $unitLabels) {
-            $pattern = "(?s)<label[^>]*>\s*$label\s*:\s*</label>\s*<p[^>]+title=`"([^`"]+)`""
-            if (($m = [regex]::Match($HTML, $pattern)).Success) {
-                $val = $m.Groups[1].Value.Trim()
-                if ($val) { return $val }
-            }
-            $pattern2 = "(?s)<label[^>]*>\s*$label\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>"
-            if (($m = [regex]::Match($HTML, $pattern2)).Success) {
-                $val = (Remove-Html $m.Groups[1].Value).Trim()
-                if ($val) { return $val }
-            }
-        }
-
-        # Fallback: ultimo segmento numerico de "Nome:"
-        $patternNome = @'
-(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($HTML, $patternNome)).Success) {
-            $nome = $m.Groups[1].Value.Trim()
-            if ($nome -match '-\s*(\d{3,})\s*$') { return $matches[1] }
-            if ($nome -match '-\s*([^\s-][^-]*)\s*$') { return $matches[1].Trim() }
-        }
-    }
+    if ($FallbackOnly) { return 'N/D' }
+    $u = Try-MatchUnidadeDescriptive $HTML
+    if ($u) { return $u }
     return 'N/D'
 }
 
 function Test-AutoNote {
     param([string]$Text)
     if ($Text.Length -lt 5) { return $true }
-    foreach ($pattern in $script:CcoConfig.AutoNotePatterns) {
-        if ($Text -match $pattern) { return $true }
+    if ($null -eq $script:_AutoNoteRxList) {
+        $lst = [System.Collections.Generic.List[System.Text.RegularExpressions.Regex]]::new()
+        $opt = [System.Text.RegularExpressions.RegexOptions]::Compiled -bor
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+            [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+        foreach ($p in $script:CcoConfig.AutoNotePatterns) {
+            try {
+                $lst.Add([System.Text.RegularExpressions.Regex]::new($p, $opt))
+            } catch {
+                Write-Verbose "Pattern AutoNote invalido (ignorado): $p"
+            }
+        }
+        $script:_AutoNoteRxList = $lst
+    }
+    foreach ($rx in $script:_AutoNoteRxList) {
+        if ($rx.IsMatch($Text)) { return $true }
     }
     return $false
 }
@@ -577,109 +729,140 @@ function Get-TicketDataFromHtml {
         [int]$sleepMs
     )
 
-    if (($m = [regex]::Match($HTML, 'Ticket#([0-9]+)')).Success) { $numero = $m.Groups[1].Value } else { $numero = 'N/D' }
-    if (($m = [regex]::Match($HTML, '(?s)<span[^>]+class="[^"]*pill[^"]*"[^>]+title="([^"]+)"')).Success) { $estado = $m.Groups[1].Value }
-    elseif (($m = [regex]::Match($HTML, '(?s)label[^>]*>\s*Estado:\s*[^<]*</label>\s*<span[^>]+title="([^"]+)"')).Success) { $estado = $m.Groups[1].Value }
+    Ensure-ZnunyParserRegexes
+    if (($m = $script:_RxTicketNumeroHdr.Match($HTML)).Success) { $numero = $m.Groups[1].Value } else { $numero = 'N/D' }
+    if (($m = $script:_RxEstadoPill.Match($HTML)).Success) { $estado = $m.Groups[1].Value }
+    elseif (($m = $script:_RxEstadoLabel.Match($HTML)).Success) { $estado = $m.Groups[1].Value }
     else { $estado = 'N/D' }
-    if (($m = [regex]::Match($HTML, '(?s)label[^>]*>\s*Criado:\s*</label>\s*<p[^>]+title="([^"]+)"')).Success) { $criado = $m.Groups[1].Value } else { $criado = 'N/D' }
+    if (($m = $script:_RxCriadoTitle.Match($HTML)).Success) { $criado = $m.Groups[1].Value } else { $criado = 'N/D' }
 
-    $token = ''
-    $tokenPatterns = @(
-        'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
-        'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
-        '"ChallengeToken",\s*"([A-Za-z0-9]+)"',
-        'ChallengeToken=([A-Za-z0-9]{{16,}})',
-        'data-challenge-token="([A-Za-z0-9]+)"',
-        'ChallengeToken:\s*"([A-Za-z0-9]+)"'
-    )
-    foreach ($tp in $tokenPatterns) {
-        if (($m = [regex]::Match($HTML, $tp)).Success) {
-            $token = $m.Groups[1].Value
-            Write-Verbose "ChallengeToken encontrado no HTML principal (ticket $ticketID): $token"
-            break
-        }
-    }
-    if (-not $token) {
-        Write-Verbose "ChallengeToken NAO encontrado no HTML principal do ticket $ticketID"
-    }
+    # Cliente/Unidade a partir do HTML principal (sem HTTP extra).
+    $cliente = Get-CustomerNameFromHtml $HTML
+    $unidade = Get-CustomerUnitFromHtml $HTML
 
     $widgetHtml = ''
-    if ($token -and $client) {
-        try {
-            $widgetHtml = $client.GetCustomerWidgetHtml($ticketID, $token)
-            if ($widgetHtml) {
-                Write-Verbose "Widget CustomerInformation obtido: $($widgetHtml.Length) chars (ticket $ticketID)"
-            } else {
-                Write-Verbose "Widget CustomerInformation retornou VAZIO para ticket $ticketID"
+    if (($cliente -eq 'N/D' -or $unidade -eq 'N/D') -and $client) {
+        $token = ''
+        foreach ($rxTok in $script:_RxChallengeTokens) {
+            if (($m = $rxTok.Match($HTML)).Success) {
+                $token = $m.Groups[1].Value
+                Write-Verbose "ChallengeToken encontrado (ticket $ticketID): $token"
+                break
             }
-        } catch {
-            Write-Verbose "Widget CustomerInformation indisponivel para ticket $ticketID : $_"
+        }
+        if (-not $token) {
+            Write-Verbose "ChallengeToken NAO encontrado; widget nao buscado (ticket $ticketID)"
+        } else {
+            try {
+                $widgetHtml = $client.GetCustomerWidgetHtml($ticketID, $token)
+                if ($widgetHtml) {
+                    Write-Verbose "Widget CustomerInformation obtido: $($widgetHtml.Length) chars (ticket $ticketID)"
+                    if ($cliente -eq 'N/D') { $cliente = Get-CustomerNameFromHtml $widgetHtml }
+                    if ($unidade -eq 'N/D') { $unidade = Get-CustomerUnitFromHtml $widgetHtml }
+                } else {
+                    Write-Verbose "Widget CustomerInformation retornou VAZIO para ticket $ticketID"
+                }
+            } catch {
+                Write-Verbose "Widget CustomerInformation indisponivel para ticket $ticketID : $_"
+            }
         }
     } else {
-        Write-Verbose "ChallengeToken ausente ou cliente invalido - widget nao buscado (ticket $ticketID)"
+        Write-Verbose "Cliente e unidade ja no HTML principal; pulando widget AJAX (ticket $ticketID)"
     }
 
-    $cliente = 'N/D'
-    $unidade = 'N/D'
-    foreach ($src in @($widgetHtml, $HTML) | Where-Object { $_ }) {
-        if ($cliente -eq 'N/D') { $cliente = Get-CustomerNameFromHtml $src }
-        if ($unidade -eq 'N/D') { $unidade = Get-CustomerUnitFromHtml $src }
-        if ($cliente -ne 'N/D' -and $unidade -ne 'N/D') { break }
-    }
     Write-Verbose "Resultado extracao: Cliente=$cliente, Unidade=$unidade (ticket $ticketID)"
 
-    # Ajuste: se unidade == cliente, algo saiu errado - tenta campo alternativo
-    if ($unidade -ne 'N/D' -and $unidade -ceq $cliente) {
+    # Ajuste: se unidade == cliente, algo saiu errado - tenta outro campo descritivo (ex.: Loja/Filial no widget)
+    if ($unidade -ne 'N/D' -and $unidade -eq $cliente) {
         Write-Verbose "Unidade igual ao Cliente, tentando campo alternativo..."
         $searchSrc = $widgetHtml + $HTML
-
-        $patternAlt1 = @'
-(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*<p[^>]+title="([^"]+)"
-'@
-        if (($m = [regex]::Match($searchSrc, $patternAlt1)).Success) {
-            $alt = $m.Groups[1].Value.Trim()
-            if ($alt -and $alt -notmatch '@') { $unidade = $alt }
-        }
-        else {
-            $patternAlt2 = '(?s)<label[^>]*>\s*CodigoCliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"'
-            if (($m = [regex]::Match($searchSrc, $patternAlt2)).Success) {
-                $alt = $m.Groups[1].Value.Trim()
-                if ($alt) { $unidade = $alt }
-            }
-        }
+        $alt = Try-MatchUnidadeDescriptive $searchSrc -ExcludeEqualTo $cliente
+        if ($alt) { $unidade = $alt }
         Write-Verbose "Apos ajuste: Cliente=$cliente, Unidade=$unidade"
     }
 
     $articles = [System.Collections.Generic.List[object]]::new()
-    $rowPattern = @'
-(?s)<tr[^>]*id="Row\d+"[^>]*>(.*?)</tr>
-'@
-    $rowMatches = [regex]::Matches($HTML, $rowPattern)
+    $rowMatches = $script:_RxTrArticleRows.Matches($HTML)
 
+    # Linhas de artigo (sem baixar corpo ainda). Em modo limitado (ex.: 4 notas no live),
+    # ordena por data decrescente para buscar primeiro as mais recentes e parar cedo.
+    $rowList = [System.Collections.Generic.List[object]]::new()
     foreach ($row in $rowMatches) {
         $rowHtml = $row.Groups[1].Value
-        if (($m = [regex]::Match($rowHtml, '<input[^>]+class="ArticleID"[^>]+value="(\d+)"')).Success) { $aid = $m.Groups[1].Value } else { $aid = $null }
-        if (($m = [regex]::Match($rowHtml, '<td class="Created">[^<]*<div title="([^"]+)"')).Success) { $adate = $m.Groups[1].Value } else { $adate = 'N/D' }
-        if (-not $aid) { continue }
+        $mAid = $script:_RxArtIdInRow.Match($rowHtml)
+        if (-not $mAid.Success) { continue }
+        $aid = $mAid.Groups[1].Value
+        $mDt = $script:_RxArtDateInRow.Match($rowHtml)
+        if ($mDt.Success) { $adate = $mDt.Groups[1].Value } else { $adate = 'N/D' }
+        $sortKey = [datetime]::MinValue
+        if (($mSk = $script:_RxArtDateSortKey.Match($adate)).Success) {
+            try {
+                $sortKey = Get-Date -Year ([int]$mSk.Groups[3].Value) -Month ([int]$mSk.Groups[2].Value) -Day ([int]$mSk.Groups[1].Value) `
+                    -Hour ([int]$mSk.Groups[4].Value) -Minute ([int]$mSk.Groups[5].Value) -Second 0
+            } catch {}
+        }
+        $rowList.Add([ordered]@{ Row = $rowHtml; Aid = $aid; Adate = $adate; SortKey = $sortKey })
+    }
+
+    $unlimitedArticles = ($maxArticles -ge 9000)
+    $unlimitedFetch = ($fetchLimit -ge 9000)
+    $fetchCount = 0
+
+    if (-not $unlimitedArticles -and $rowList.Count -gt 1) {
+        $rowList.Sort([System.Comparison[object]]{
+            param($a, $b)
+            return ([datetime]$b.SortKey).CompareTo([datetime]$a.SortKey)
+        })
+    }
+
+    $articlePlainPreferred = $null
+    foreach ($item in $rowList) {
+        if (-not $unlimitedArticles -and $articles.Count -ge $maxArticles) { break }
+        if (-not $unlimitedFetch -and $fetchCount -ge $fetchLimit) { break }
+
+        $aid   = $item.Aid
+        $adate = $item.Adate
         try {
-            $raw = $client.GetArticleContent($ticketID, $aid)
-            $raw = $raw -replace '(?s)<style[^>]*>.*?</style>', ''
-            $raw = $raw -replace '(?s)<script[^>]*>.*?</script>', ''
-            if (($m = [regex]::Match($raw, '(?s)<body[^>]*>(.*)</body>')).Success) { $body = $m.Groups[1].Value.Trim() } else { $body = '' }
+            if ($null -eq $articlePlainPreferred) {
+                $httpThis = 0
+                $rawTry = $null
+                try {
+                    $rawTry = $client.GetArticleRaw($ticketID, $aid, 'Plain')
+                    $httpThis++
+                } catch { }
+                $probeChunk = Get-ArticleBodyChunk $rawTry
+                if ($probeChunk.Length -ge 5 -and -not (Test-ArticleRawLooksLikeLoginPage $rawTry)) {
+                    $articlePlainPreferred = $true
+                    $raw = $rawTry
+                } else {
+                    $articlePlainPreferred = $false
+                    $raw = $client.GetArticleRaw($ticketID, $aid, 'HTMLView')
+                    $httpThis++
+                }
+                $fetchCount += $httpThis
+            } elseif ($articlePlainPreferred) {
+                $raw = $client.GetArticleRaw($ticketID, $aid, 'Plain')
+                $fetchCount++
+            } else {
+                $raw = $client.GetArticleRaw($ticketID, $aid, 'HTMLView')
+                $fetchCount++
+            }
+
+            $body = Get-ArticleBodyChunk $raw
             if (-not $body) { continue }
             $text = Remove-Html $body
 
-            if (($am = [regex]::Match($text, 'Analista designado[:\s]*@([\w\s]+)')).Success) {
+            if (($am = $script:_RxN2Assign.Match($text)).Success) {
                 $text = "Em tratativas com N2 @$($am.Groups[1].Value.Trim())"
             }
-            $text = $text -replace '\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}\s*-\s*\S+@\S+\s+escreveu:.*$', ''
-            $text = $text -replace '\s*Em\s+\d{2}/\d{2}/\d{4}.*?escreveu:.*$', ''
-            $text = ($text -replace '\s+', ' ').Trim()
+            $text = $script:_RxFootEscreveu.Replace($text, '')
+            $text = $script:_RxFootEmBlock.Replace($text, '')
+            $text = $script:_RxStripWs.Replace($text, ' ').Trim()
 
             if ($text.Length -ge 5 -and -not (Test-AutoNote $text)) {
                 $articles.Add([PSCustomObject]@{ Date = $adate; Text = $text })
             }
-            Start-Sleep -Milliseconds $sleepMs
+            if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
         } catch { Write-Verbose "Erro ao obter artigo $aid para ticket $ticketID" }
     }
     $articles.Reverse()
@@ -744,8 +927,8 @@ function Export-CcoReport {
         [int]$MaxArticles = 9999,
         [int]$FetchLimit = 9999,
         [int]$RetryMax = 3,
-        [int]$SleepArticleMs = 50,
-        [int]$SleepTicketMs = 100,
+        [int]$SleepArticleMs = 5,
+        [int]$SleepTicketMs = 15,
         [switch]$AbrirRelatorio,
         [switch]$DiagMode
     )
@@ -777,14 +960,9 @@ function Export-CcoReport {
         Write-Host "[DIAG] HTML principal -> $diagMainPath ($($diagMain.Length) chars)" -ForegroundColor Yellow
 
         $diagToken = ''
-        foreach ($tp in @(
-            'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
-            'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
-            '"ChallengeToken",\s*"([A-Za-z0-9]+)"',
-            'ChallengeToken=([A-Za-z0-9]{{16,}})',
-            'data-challenge-token="([A-Za-z0-9]+)"'
-        )) {
-            if (($m = [regex]::Match($diagMain, $tp)).Success) { $diagToken = $m.Groups[1].Value; break }
+        Ensure-ZnunyParserRegexes
+        foreach ($rxTok in $script:_RxChallengeTokens) {
+            if (($m = $rxTok.Match($diagMain)).Success) { $diagToken = $m.Groups[1].Value; break }
         }
 
         if ($diagToken) {
@@ -803,6 +981,9 @@ function Export-CcoReport {
     }
 
     $activeIds = $client.GetActiveTicketIDs($SearchPath)
+    $activeSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($id in $activeIds) { [void]$activeSet.Add($id) }
+
     $cache = [TicketCache]::new($EstadoFile)
 
     Write-Verbose "Ativos na busca: $($activeIds.Count)"
@@ -811,9 +992,14 @@ function Export-CcoReport {
     $allIds = [System.Collections.Generic.List[string]]::new()
     foreach ($id in $activeIds) { $allIds.Add($id) }
     foreach ($id in $cache.Data.Keys) {
-        if ($id -notin $allIds) { $allIds.Add($id) }
+        if (-not $activeSet.Contains($id)) { $allIds.Add($id) }
     }
-    $allIds = $allIds | Sort-Object { [int]$_ }
+    if ($allIds.Count -gt 1) {
+        $allIds.Sort([System.Comparison[string]]{
+            param($a, $b)
+            return ([int]$a).CompareTo([int]$b)
+        })
+    }
 
     Write-Verbose "Total a processar: $($allIds.Count)"
 
@@ -823,11 +1009,16 @@ function Export-CcoReport {
     $httpCount = 0
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
+    $progN = 0
+    $progStep = if ($allIds.Count -gt 120) { 15 } elseif ($allIds.Count -gt 60) { 10 } elseif ($allIds.Count -gt 25) { 7 } else { 5 }
     foreach ($tid in $allIds) {
-        Write-Progress -Activity "Processando tickets" -Status "Ticket $tid" -PercentComplete (($httpCount+$cacheHits)/$allIds.Count*100)
+        $progN++
+        if (($progN % $progStep) -eq 0 -or $progN -eq 1) {
+            $pct = [int]([Math]::Min(100, $progN * 100 / [Math]::Max(1, $allIds.Count)))
+            Write-Progress -Activity "Processando tickets" -Status "Ticket $tid ($progN/$($allIds.Count))" -PercentComplete $pct
+        }
 
-        if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds) {
+        if ($cache.IsCachedAndResolved($tid) -and -not $activeSet.Contains($tid)) {
             Write-Verbose "TID $tid - CACHE"
             $ticket = $cache.GetCachedTicket($tid)
             $resolvidos.Add($ticket)
@@ -852,7 +1043,7 @@ function Export-CcoReport {
                 $ativos.Add($ticket)
             }
             $httpCount++
-            Start-Sleep -Milliseconds $SleepTicketMs
+            if ($SleepTicketMs -gt 0) { Start-Sleep -Milliseconds $SleepTicketMs }
         } catch {
             Write-Warning "Falha ao processar ticket $tid : $_"
         }
@@ -930,6 +1121,9 @@ function Invoke-GerarTxt {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    $sa = 5; $st = 15
+    if ($null -ne $Cfg.SleepArticleMs) { $sa = [int]$Cfg.SleepArticleMs }
+    if ($null -ne $Cfg.SleepTicketMs)  { $st = [int]$Cfg.SleepTicketMs }
     $params = @{
         BaseURL        = $Cfg.BaseURL
         Username       = $Cfg.Username
@@ -937,6 +1131,8 @@ function Invoke-GerarTxt {
         SearchPath     = $Cfg.SearchPath
         EstadoFile     = $Cfg.EstadoFile
         OutputDir      = $Cfg.OutputPath
+        SleepArticleMs = $sa
+        SleepTicketMs  = $st
         AbrirRelatorio = $false
         DiagMode       = $false
     }
@@ -971,6 +1167,9 @@ function Invoke-GerarJson {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    $sa = 5; $st = 15
+    if ($null -ne $Cfg.SleepArticleMs) { $sa = [int]$Cfg.SleepArticleMs }
+    if ($null -ne $Cfg.SleepTicketMs)  { $st = [int]$Cfg.SleepTicketMs }
     $params = @{
         BaseURL        = $Cfg.BaseURL
         Username       = $Cfg.Username
@@ -978,6 +1177,8 @@ function Invoke-GerarJson {
         SearchPath     = $Cfg.SearchPath
         EstadoFile     = $Cfg.EstadoFile
         OutputDir      = $Cfg.OutputPath
+        SleepArticleMs = $sa
+        SleepTicketMs  = $st
         AbrirRelatorio = $false
         DiagMode       = $false
     }
@@ -1097,18 +1298,31 @@ function Get-LiveTickets {
         [hashtable]$Cfg,
         # Se > 0, mantem apenas as N notas mais recentes (apos ordenacao cronologica no TicketData).
         # Se 0, retorna todas as notas obtidas do OTRS.
-        [int]$RecentArticlesOnly = 4
+        [int]$RecentArticlesOnly = 4,
+        # Quando informado, reutiliza a sessao ja autenticada (evita login/logout a cada refresh).
+        [OtrsClient]$SessionClient = $null
     )
-    $client = [OtrsClient]::new($Cfg.BaseURL, 45)
-    try {
+    $ownClient = $false
+    $client = $SessionClient
+    if ($null -eq $client) {
+        $client = [OtrsClient]::new($Cfg.BaseURL, 8)
         $client.Login($Cfg.Username, $Cfg.Password)
+        $ownClient = $true
+    }
+    try {
         $ids = $client.GetActiveTicketIDs($Cfg.SearchPath)
         $list = [System.Collections.Generic.List[object]]::new()
         foreach ($id in $ids) {
             try {
                 $html   = $client.GetTicketHtml($id)
+                $maxArt = 9999
+                $fetchLim = 9999
+                if ($RecentArticlesOnly -gt 0) {
+                    $maxArt = $RecentArticlesOnly
+                    $fetchLim = [Math]::Max(60, $RecentArticlesOnly * 25)
+                }
                 $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $id -client $client `
-                    -maxArticles 9999 -fetchLimit 9999 -sleepMs 50
+                    -maxArticles $maxArt -fetchLimit $fetchLim -sleepMs 0
                 if ($null -eq $ticket) { continue }
                 if ($RecentArticlesOnly -gt 0 -and $ticket.Articles.Count -gt $RecentArticlesOnly) {
                     $short = [System.Collections.Generic.List[object]]::new()
@@ -1123,7 +1337,7 @@ function Get-LiveTickets {
         }
         return @($list)
     } finally {
-        $client.Logout()
+        if ($ownClient) { $client.Logout() }
     }
 }
 
@@ -1150,6 +1364,7 @@ function Show-TicketCard {
 
     $W = [Math]::Max(50, [Console]::WindowWidth - 1)
     $H = [Console]::WindowHeight
+    Ensure-ZnunyParserRegexes
 
     # Linhas fixas: header(3) + blank + 5 info + blank + 3 notas-hdr + footer(2) + blank = 16
     # Se tem timer, +1 linha no footer
@@ -1241,7 +1456,7 @@ function Show-TicketCard {
             $dateFmt = Format-NoteDate $nota.Date
             $numPart = ($ni + 1).ToString().PadLeft(2)
             $prefix  = "  [" + $numPart + "] " + $dateFmt + "  "
-            $txt = ($nota.Text -replace '\s+', ' ').Trim()
+            $txt = $script:_RxStripWs.Replace($nota.Text, ' ').Trim()
             if ($txt.Length -gt $textW) { $txt = $txt.Substring(0, $textW - 3) + "..." }
             Write-Host $prefix -ForegroundColor DarkGray -NoNewline
             Write-Host $txt    -ForegroundColor White
@@ -1264,7 +1479,19 @@ function Load-TicketsFromCache {
     if (-not (Test-Path $CachePath)) { return @() }
     $cache = [TicketCache]::new($CachePath)
     $list  = [System.Collections.Generic.List[object]]::new()
-    foreach ($id in ($cache.Data.Keys | Sort-Object { [int]$_ })) {
+    $kc = $cache.Data.Keys.Count
+    $keyArr = New-Object string[] $kc
+    $ki = 0
+    foreach ($k in $cache.Data.Keys) {
+        $keyArr[$ki++] = [string]$k
+    }
+    if ($keyArr.Length -gt 1) {
+        [Array]::Sort($keyArr, [System.Comparison[string]]{
+            param($a, $b)
+            return ([int]$a).CompareTo([int]$b)
+        })
+    }
+    foreach ($id in $keyArr) {
         $list.Add($cache.GetCachedTicket($id))
     }
     return @($list)
@@ -1354,18 +1581,25 @@ function Show-VisualizadorRealTime {
     if ($TodasNotas) {
         Write-Warn "Modo completo: cada atualizacao baixa todas as notas (pode ser lento)."
     }
+    Write-Info "Sessao unica no OTRS: um login ao entrar e logout ao sair com [Q] (menos avisos de excesso de logins)."
     Write-Info "Conectando e buscando chamados ativos..."
     Write-Host ""
 
+    $otrsClient = [OtrsClient]::new($Cfg.BaseURL, 8)
     try {
         Ensure-ExportScript $ExportScript
-        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
+        $otrsClient.Login($Cfg.Username, $Cfg.Password)
+        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
     } catch {
-        Write-Err ("Falha ao buscar: " + $_); Pause-Screen; return
+        Write-Err ("Falha ao buscar: " + $_)
+        try { $otrsClient.Logout() } catch {}
+        Pause-Screen; return
     }
 
     if ($tickets.Count -eq 0) {
-        Write-Warn "Nenhum chamado ativo encontrado."; Pause-Screen; return
+        Write-Warn "Nenhum chamado ativo encontrado."
+        try { $otrsClient.Logout() } catch {}
+        Pause-Screen; return
     }
 
     $null = Update-Normalizados $tickets
@@ -1373,53 +1607,83 @@ function Show-VisualizadorRealTime {
     $idx         = 0
     $lastRefresh = [DateTime]::Now
 
-    while ($true) {
-        $secsLeft = $REFRESH_SEC - [int]([DateTime]::Now - $lastRefresh).TotalSeconds
-        if ($secsLeft -lt 0) { $secsLeft = 0 }
+    try {
+        while ($true) {
+            $secsLeft = $REFRESH_SEC - [int]([DateTime]::Now - $lastRefresh).TotalSeconds
+            if ($secsLeft -lt 0) { $secsLeft = 0 }
 
-        Show-TicketCard $tickets[$idx] $idx $tickets.Count 0 $cardMaxNotes $secsLeft
+            Show-TicketCard $tickets[$idx] $idx $tickets.Count 0 $cardMaxNotes $secsLeft
 
-        # Espera ate 500ms por tecla
-        $waited = 0 ; $keyFound = $false
-        while ($waited -lt 500) {
-            if ($Host.UI.RawUI.KeyAvailable) { $keyFound = $true; break }
-            Start-Sleep -Milliseconds 100
-            $waited += 100
+            # Espera ate 500ms por tecla
+            $waited = 0 ; $keyFound = $false
+            while ($waited -lt 500) {
+                if ($Host.UI.RawUI.KeyAvailable) { $keyFound = $true; break }
+                Start-Sleep -Milliseconds 100
+                $waited += 100
+            }
+
+            # Verifica se chegou hora do refresh automatico
+            $elapsed = ([DateTime]::Now - $lastRefresh).TotalSeconds
+            if (-not $keyFound -and $elapsed -ge $REFRESH_SEC) {
+                try {
+                    $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                    $norm = Update-Normalizados $newT
+                    $tickets = $newT
+                    if ($idx -ge $tickets.Count) { $idx = 0 }
+                    $lastRefresh = [DateTime]::Now
+                    if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                } catch {
+                    try {
+                        Write-Warn ("Atualizacao automatica falhou; tentando novo login: " + $_)
+                        $otrsClient.Login($Cfg.Username, $Cfg.Password)
+                        $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                        $norm = Update-Normalizados $newT
+                        $tickets = $newT
+                        if ($idx -ge $tickets.Count) { $idx = 0 }
+                        $lastRefresh = [DateTime]::Now
+                        if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                    } catch {
+                        Write-Warn ("Ainda falhou: " + $_)
+                    }
+                }
+                continue
+            }
+
+            if (-not $keyFound) { continue }
+
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            $vk  = [int]$key.VirtualKeyCode
+            $ch  = [string]$key.Character
+
+            if     ($vk -eq 39 -or $vk -eq 34) { if ($idx -lt ($tickets.Count-1)) { $idx++ } else { $idx=0 } }
+            elseif ($vk -eq 37 -or $vk -eq 33) { if ($idx -gt 0) { $idx-- } else { $idx=$tickets.Count-1 } }
+            elseif ($ch -eq 'r' -or $ch -eq 'R') {
+                try {
+                    $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                    $norm = Update-Normalizados $newT
+                    $tickets = $newT
+                    if ($idx -ge $tickets.Count) { $idx = 0 }
+                    $lastRefresh = [DateTime]::Now
+                    if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                } catch {
+                    try {
+                        Write-Warn ("Refresh manual falhou; tentando novo login: " + $_)
+                        $otrsClient.Login($Cfg.Username, $Cfg.Password)
+                        $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -SessionClient $otrsClient
+                        $norm = Update-Normalizados $newT
+                        $tickets = $newT
+                        if ($idx -ge $tickets.Count) { $idx = 0 }
+                        $lastRefresh = [DateTime]::Now
+                        if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
+                    } catch {
+                        Write-Warn ("Ainda falhou: " + $_)
+                    }
+                }
+            }
+            elseif ($ch -eq 'q' -or $ch -eq 'Q' -or $vk -eq 27) { [Console]::Clear(); return }
         }
-
-        # Verifica se chegou hora do refresh automatico
-        $elapsed = ([DateTime]::Now - $lastRefresh).TotalSeconds
-        if (-not $keyFound -and $elapsed -ge $REFRESH_SEC) {
-            try {
-                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
-                $norm = Update-Normalizados $newT
-                $tickets = $newT
-                if ($idx -ge $tickets.Count) { $idx = 0 }
-                $lastRefresh = [DateTime]::Now
-                if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
-            } catch { }
-            continue
-        }
-
-        if (-not $keyFound) { continue }
-
-        $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        $vk  = [int]$key.VirtualKeyCode
-        $ch  = [string]$key.Character
-
-        if     ($vk -eq 39 -or $vk -eq 34) { if ($idx -lt ($tickets.Count-1)) { $idx++ } else { $idx=0 } }
-        elseif ($vk -eq 37 -or $vk -eq 33) { if ($idx -gt 0) { $idx-- } else { $idx=$tickets.Count-1 } }
-        elseif ($ch -eq 'r' -or $ch -eq 'R') {
-            try {
-                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
-                $norm = Update-Normalizados $newT
-                $tickets = $newT
-                if ($idx -ge $tickets.Count) { $idx = 0 }
-                $lastRefresh = [DateTime]::Now
-                if ($norm.Count -gt 0) { Show-NormalizacaoAlert $norm }
-            } catch { }
-        }
-        elseif ($ch -eq 'q' -or $ch -eq 'Q' -or $vk -eq 27) { [Console]::Clear(); return }
+    } finally {
+        try { $otrsClient.Logout() } catch {}
     }
 }
 
@@ -1430,8 +1694,8 @@ function Show-VisualizadorMenu {
     Write-Banner
     Write-Centered "-- VISUALIZAR CHAMADOS --" 'White'
     Write-Host ""
-    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    'Atualiza a cada 60s; apenas as 4 notas mais recentes por chamado'
-    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    'Atualiza a cada 60s; todas as notas de cada chamado ativo (mais lento)'
+    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    'Sessao unica; atualiza a cada 60s; 4 notas mais recentes por chamado'
+    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    'Sessao unica; atualiza a cada 60s; todas as notas (mais lento)'
     Write-MenuOpt '3' 'Cache local (offline)     ' 'Yellow'   'Ultimo relatorio salvo em JSON; todas as notas, sem consultar OTRS'
     Write-MenuOpt '0' 'Voltar                    ' 'DarkGray' ''
     Write-Host ""
@@ -1450,47 +1714,241 @@ function Show-VisualizadorMenu {
 
 
 # =============================================================================
-# Integracao com Hub (http://172.16.0.49:3210)
+# Integracao com Hub (http://172.16.0.49:3210) - API externa: validacao e timeouts
 # =============================================================================
 $script:HubSession = $null
+$script:HubRequestTimeoutSec = 90
+
+function Hub-InvokeWebRequest {
+    param(
+        [string]$Uri,
+        [string]$Method = 'GET',
+        [object]$WebSession = $null,
+        [string]$ContentType = $null,
+        [string]$Body = $null,
+        [int]$TimeoutSec = 0,
+        [string]$SessionVariable = $null
+    )
+    if ($TimeoutSec -le 0) { $TimeoutSec = $script:HubRequestTimeoutSec }
+    $verb = $Method.ToUpperInvariant()
+    $p = @{
+        Uri             = $Uri
+        Method          = $Method
+        UseBasicParsing = $true
+        TimeoutSec      = $TimeoutSec
+        ErrorAction     = 'Stop'
+    }
+    if ($SessionVariable) {
+        $p.SessionVariable = $SessionVariable
+    } elseif ($WebSession) {
+        # Windows PowerShell 5.1: sessao apos POST JSON pode manter Content-Type no WebSession e o
+        # proximo GET falha com "Nao e possivel enviar um conteudo com este tipo de verbo".
+        # Para GET/HEAD, nao passar WebSession; enviar so Cookie (e Authorization se existir).
+        if ($verb -eq 'GET' -or $verb -eq 'HEAD') {
+            $hdr = @{}
+            try {
+                $uObj = [Uri]$Uri
+                $ck = $WebSession.Cookies.GetCookieHeader($uObj)
+                if ($ck) { $hdr['Cookie'] = $ck }
+            } catch { }
+            if ($WebSession.Headers) {
+                foreach ($key in @($WebSession.Headers.Keys)) {
+                    if ($key -match '^(?i)authorization$') {
+                        $hdr[$key] = [string]$WebSession.Headers[$key]
+                    }
+                }
+            }
+            if ($hdr.Count -gt 0) { $p.Headers = $hdr }
+        } else {
+            $p.WebSession = $WebSession
+        }
+    }
+    if ($verb -ne 'GET' -and $verb -ne 'HEAD') {
+        if ($ContentType) { $p.ContentType = $ContentType }
+        if ($null -ne $Body -and $Body -ne '') { $p.Body = $Body }
+    }
+    $resp = Invoke-WebRequest @p
+    if ($SessionVariable) {
+        $script:HubSession = Get-Variable -Name $SessionVariable -Scope Local -ValueOnly -ErrorAction Stop
+        Remove-Variable -Name $SessionVariable -Scope Local -ErrorAction SilentlyContinue
+    }
+    return $resp
+}
+
+function Normalize-HubUpdatesFromAny {
+    param($updates)
+    $list = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $updates) { return $list }
+    foreach ($u in @($updates)) {
+        if ($null -eq $u) { continue }
+        $d = ''
+        if ($null -ne $u.date) { $d = [string]$u.date }
+        elseif ($null -ne $u.updateDate) { $d = [string]$u.updateDate }
+        $h = ''
+        if ($null -ne $u.hour) { $h = [string]$u.hour }
+        elseif ($null -ne $u.updateHour) { $h = [string]$u.updateHour }
+        $tx = if ($null -ne $u.text) { [string]$u.text } else { '' }
+        $list.Add([ordered]@{ date = $d.Trim(); hour = $h.Trim(); text = $tx })
+    }
+    return $list
+}
+
+function Normalize-HubTicketObject {
+    param($ht)
+    if ($null -eq $ht) { return $null }
+    $num = $ht.number
+    if ($null -eq $num) { return $null }
+    $nu = ([string]$num).Trim()
+    if ($nu.Length -eq 0) { return $null }
+    return [ordered]@{
+        number      = $nu
+        status      = if ($null -ne $ht.status) { [string]$ht.status } else { '' }
+        openingDate = if ($null -ne $ht.openingDate) { [string]$ht.openingDate } else { '' }
+        openingHour = if ($null -ne $ht.openingHour) { [string]$ht.openingHour } else { '' }
+        client      = if ($null -ne $ht.client) { [string]$ht.client } else { '' }
+        updates     = @((Normalize-HubUpdatesFromAny $ht.updates))
+    }
+}
+
+function Parse-HubRelatorioResponseToTickets {
+    param($obj, [System.Collections.Generic.List[string]]$warnOut)
+    $out = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $obj) {
+        [void]$warnOut.Add('Resposta JSON nula do Hub.')
+        return $out
+    }
+    if ($obj -is [System.Array]) {
+        foreach ($x in $obj) {
+            $n = Normalize-HubTicketObject $x
+            if ($n) { $out.Add($n) }
+            elseif ($null -ne $x) { [void]$warnOut.Add('Item na lista ignorado: sem campo number valido.') }
+        }
+        return $out
+    }
+    $hasSuccess = $obj.PSObject.Properties.Match('success')
+    if ($hasSuccess.Count -gt 0 -and $obj.success -eq $false) {
+        [void]$warnOut.Add('Hub retornou success=false; lista de tickets nao sera usada.')
+        return $out
+    }
+    if ($null -ne $obj.tickets) {
+        foreach ($x in @($obj.tickets)) {
+            $n = Normalize-HubTicketObject $x
+            if ($n) { $out.Add($n) }
+            else { [void]$warnOut.Add('Ticket ignorado no array tickets: number invalido ou ausente.') }
+        }
+        return $out
+    }
+    $single = Normalize-HubTicketObject $obj
+    if ($single) { $out.Add($single) }
+    return $out
+}
+
+function Get-HubRelatorioTicketsList {
+    param([string]$HubUrl)
+    $warn = [System.Collections.Generic.List[string]]::new()
+    $base = $HubUrl.TrimEnd('/')
+    $tries = @(
+        @{ Path = '/api/relatorio/tickets'; Label = 'GET /api/relatorio/tickets' },
+        @{ Path = '/api/relatorio'; Label = 'GET /api/relatorio (legado)' }
+    )
+    foreach ($tr in $tries) {
+        try {
+            $uri = $base + $tr.Path
+            $resp = Hub-InvokeWebRequest -Uri $uri -Method GET -WebSession $script:HubSession
+            $raw = $resp.Content
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                [void]$warn.Add($tr.Label + ': corpo vazio.')
+                continue
+            }
+            $obj = $null
+            try {
+                $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                [void]$warn.Add($tr.Label + ': JSON invalido - ' + $_.Exception.Message)
+                continue
+            }
+            $list = Parse-HubRelatorioResponseToTickets $obj $warn
+            $syncV = $null
+            $syncAt = $null
+            if ($obj -and $obj -isnot [System.Array]) {
+                if ($obj.PSObject.Properties.Match('syncVersion').Count -gt 0) { $syncV = $obj.syncVersion }
+                if ($obj.PSObject.Properties.Match('syncUpdatedAt').Count -gt 0) { $syncAt = [string]$obj.syncUpdatedAt }
+            }
+            return @{
+                ok            = $true
+                tickets       = @($list)
+                syncVersion   = $syncV
+                syncUpdatedAt = $syncAt
+                source        = $tr.Label
+                warnings      = $warn
+            }
+        } catch {
+            [void]$warn.Add($tr.Label + ' falhou: ' + $_.Exception.Message)
+        }
+    }
+    return @{ ok = $false; tickets = @(); syncVersion = $null; syncUpdatedAt = $null; source = ''; warnings = $warn }
+}
+
+function Hub-VerifySession {
+    param([string]$HubUrl)
+    $base = $HubUrl.TrimEnd('/')
+    try {
+        $resp = Hub-InvokeWebRequest -Uri ($base + '/api/status/me') -Method GET -WebSession $script:HubSession
+        $j = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+        if ($j -and $j.email) {
+            Write-OK ('Sessao Hub valida: ' + [string]$j.email)
+            return $true
+        }
+        Write-Warn 'GET /api/status/me nao retornou email; sessao pode estar incompleta.'
+        return $false
+    } catch {
+        Write-Warn ('Validacao de sessao ignorada (/api/status/me): ' + $_.Exception.Message)
+        return $false
+    }
+}
 
 function Hub-Login {
     param([string]$HubUrl, [string]$Email, [string]$Pass)
     $base = $HubUrl.TrimEnd('/')
     $loginBody = (@{ email = $Email; password = $Pass } | ConvertTo-Json -Compress)
-    $resp = Invoke-WebRequest -Uri ($base + "/api/login") `
-        -Method POST -ContentType "application/json; charset=utf-8" -Body $loginBody `
-        -SessionVariable 'WebSess' -UseBasicParsing
-    $script:HubSession = $WebSess
-    return $resp.Content | ConvertFrom-Json
+    $sv = 'HubSess_' + ([Guid]::NewGuid().ToString('N').Substring(0, 12))
+    $resp = Hub-InvokeWebRequest -Uri ($base + '/api/login') -Method POST `
+        -ContentType 'application/json; charset=utf-8' -Body $loginBody `
+        -SessionVariable $sv
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Hub-Get {
     param([string]$HubUrl, [string]$Path)
     $base = $HubUrl.TrimEnd('/')
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method GET -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    $resp = Hub-InvokeWebRequest -Uri ($base + $Path) -Method GET -WebSession $script:HubSession
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Hub-Post {
     param([string]$HubUrl, [string]$Path, $Body)
     $base = $HubUrl.TrimEnd('/')
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method POST -ContentType "application/json" -Body $json `
-        -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    $resp = Hub-InvokeWebRequest -Uri ($base + $Path) -Method POST `
+        -ContentType 'application/json; charset=utf-8' -Body $json -WebSession $script:HubSession
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Hub-Put {
     param([string]$HubUrl, [string]$Path, $Body)
     $base = $HubUrl.TrimEnd('/')
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method PUT -ContentType "application/json" -Body $json `
-        -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    $resp = Hub-InvokeWebRequest -Uri ($base + $Path) -Method PUT `
+        -ContentType 'application/json; charset=utf-8' -Body $json -WebSession $script:HubSession
+    $raw = $resp.Content
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json -ErrorAction Stop
 }
 
 function Build-HubTicket {
@@ -1512,7 +1970,8 @@ function Build-HubTicket {
             $uDate = $Matches[3] + "-" + $Matches[2] + "-" + $Matches[1]
             $uHour = $Matches[4] + ":" + $Matches[5]
         }
-        $updates.Add([ordered]@{ date=$uDate; hour=$uHour; text=$n.Text })
+        # Contrato observado na API GET do Hub (updateDate / updateHour / text)
+        $updates.Add([ordered]@{ updateDate = $uDate; updateHour = $uHour; text = $n.Text })
     }
 
     # Campos alinhados ao formulario do Hub (relatorio CCO). O campo "ocorrencia" nao e enviado
@@ -1530,12 +1989,14 @@ function Build-HubTicket {
 function Test-HubRelatorioChanged {
     param($hubTicket, $payload)
     if (-not $hubTicket) { return $true }
-    if (($hubTicket.status -or '') -ne ($payload.status -or '')) { return $true }
-    if (($hubTicket.openingDate -or '') -ne ($payload.openingDate -or '')) { return $true }
-    if (($hubTicket.openingHour -or '') -ne ($payload.openingHour -or '')) { return $true }
-    if (($hubTicket.client -or '') -ne ($payload.client -or '')) { return $true }
+    $pn = Normalize-HubTicketObject $payload
+    if (-not $pn) { return $true }
+    if (($hubTicket.status -or '') -ne ($pn.status -or '')) { return $true }
+    if (($hubTicket.openingDate -or '') -ne ($pn.openingDate -or '')) { return $true }
+    if (($hubTicket.openingHour -or '') -ne ($pn.openingHour -or '')) { return $true }
+    if (($hubTicket.client -or '') -ne ($pn.client -or '')) { return $true }
     $hu = @($hubTicket.updates)
-    $pu = @($payload.updates)
+    $pu = @($pn.updates)
     if ($hu.Count -ne $pu.Count) { return $true }
     for ($i = 0; $i -lt $hu.Count; $i++) {
         if (($hu[$i].text -or '') -ne ($pu[$i].text -or '')) { return $true }
@@ -1545,18 +2006,85 @@ function Test-HubRelatorioChanged {
     return $false
 }
 
-function Show-HubTicketPreview {
+function Test-HubPayloadCompleto {
     param($Payload)
-    Write-Host "  Ticket   : #" -ForegroundColor DarkGray -NoNewline
-    Write-Host $Payload.number -ForegroundColor Yellow
-    Write-Host "  Cliente  : " -ForegroundColor DarkGray -NoNewline
-    Write-Host $Payload.client -ForegroundColor White
-    Write-Host "  Estado   : " -ForegroundColor DarkGray -NoNewline
-    Write-Host $Payload.status -ForegroundColor Yellow
-    Write-Host "  Abertura : " -ForegroundColor DarkGray -NoNewline
-    Write-Host ($Payload.openingDate + " " + $Payload.openingHour) -ForegroundColor White
-    Write-Host "  Atualizac: " -ForegroundColor DarkGray -NoNewline
-    Write-Host ($Payload.updates.Count.ToString() + " notas") -ForegroundColor White
+    $probs = [System.Collections.Generic.List[string]]::new()
+    if ($null -eq $Payload) {
+        [void]$probs.Add('Dados do chamado indisponiveis (payload nulo).')
+        return @{ ok = $false; problemas = @($probs) }
+    }
+    $num = [string]$Payload.number
+    if ([string]::IsNullOrWhiteSpace($num)) { [void]$probs.Add('Numero do chamado vazio.') }
+    $st = [string]$Payload.status
+    if ([string]::IsNullOrWhiteSpace($st)) { [void]$probs.Add('Estado vazio.') }
+    $cl = [string]$Payload.client
+    if ([string]::IsNullOrWhiteSpace($cl)) { [void]$probs.Add('Cliente vazio.') }
+    $od = [string]$Payload.openingDate
+    $oh = [string]$Payload.openingHour
+    if ([string]::IsNullOrWhiteSpace($od)) { [void]$probs.Add('Data de abertura vazia ou nao reconhecida no cache (formato esperado AAAA-MM-DD).') }
+    elseif ($od -notmatch '^\d{4}-\d{2}-\d{2}$') { [void]$probs.Add('Data de abertura invalida: "' + $od + '" (use AAAA-MM-DD).') }
+    if ([string]::IsNullOrWhiteSpace($oh)) { [void]$probs.Add('Hora de abertura vazia ou nao reconhecida (formato esperado HH:MM).') }
+    elseif ($oh -notmatch '^\d{2}:\d{2}$') { [void]$probs.Add('Hora de abertura invalida: "' + $oh + '" (use HH:MM).') }
+    $ups = @($Payload.updates)
+    if ($ups.Count -eq 0) { [void]$probs.Add('Nenhuma nota/atualizacao no payload (e obrigatorio pelo menos uma para o relatorio).') }
+    $i = 0
+    foreach ($u in $ups) {
+        $i++
+        $ud = ''
+        if ($null -ne $u.updateDate) { $ud = [string]$u.updateDate } elseif ($null -ne $u.date) { $ud = [string]$u.date }
+        $uh = ''
+        if ($null -ne $u.updateHour) { $uh = [string]$u.updateHour } elseif ($null -ne $u.hour) { $uh = [string]$u.hour }
+        $tx = if ($null -ne $u.text) { [string]$u.text } else { '' }
+        if ([string]::IsNullOrWhiteSpace($ud)) { [void]$probs.Add('Nota ' + $i.ToString() + ': data da atualizacao vazia.') }
+        elseif ($ud -notmatch '^\d{4}-\d{2}-\d{2}$') { [void]$probs.Add('Nota ' + $i.ToString() + ': data invalida ("' + $ud + '").') }
+        if ([string]::IsNullOrWhiteSpace($uh)) { [void]$probs.Add('Nota ' + $i.ToString() + ': hora da atualizacao vazia.') }
+        elseif ($uh -notmatch '^\d{2}:\d{2}$') { [void]$probs.Add('Nota ' + $i.ToString() + ': hora invalida ("' + $uh + '").') }
+        if ([string]::IsNullOrWhiteSpace($tx)) { [void]$probs.Add('Nota ' + $i.ToString() + ': texto vazio.') }
+    }
+    return @{ ok = ($probs.Count -eq 0); problemas = @($probs) }
+}
+
+function Show-HubPayloadRevisaoCompleta {
+    param($Payload, [int]$MaxCharsNota = 8000)
+    Write-Host ""
+    Write-ThinDiv 'Cyan'
+    Write-Host "  === REVISAO COMPLETA (conferir antes do Hub) ===" -ForegroundColor Cyan
+    Write-Host ("  Numero .: #" + [string]$Payload.number) -ForegroundColor White
+    Write-Host ("  Estado ..: " + [string]$Payload.status) -ForegroundColor White
+    Write-Host ("  Cliente .: " + [string]$Payload.client) -ForegroundColor White
+    Write-Host ("  Abertura : " + [string]$Payload.openingDate + " " + [string]$Payload.openingHour) -ForegroundColor White
+    Write-Host ("  Notas ...: " + @($Payload.updates).Count.ToString()) -ForegroundColor White
+    Write-ThinDiv 'Cyan'
+    $idx = 0
+    foreach ($u in @($Payload.updates)) {
+        $idx++
+        $ud = if ($null -ne $u.updateDate) { [string]$u.updateDate } elseif ($null -ne $u.date) { [string]$u.date } else { '' }
+        $uh = if ($null -ne $u.updateHour) { [string]$u.updateHour } elseif ($null -ne $u.hour) { [string]$u.hour } else { '' }
+        $tx = if ($null -ne $u.text) { [string]$u.text } else { '' }
+        Write-Host ("  --- Nota " + $idx.ToString() + " | " + $ud + " " + $uh + " ---") -ForegroundColor Yellow
+        $origLen = $tx.Length
+        if ($origLen -gt $MaxCharsNota) {
+            $tx = $tx.Substring(0, $MaxCharsNota) + "`n  ... [truncado na tela; total " + $origLen.ToString() + " caracteres]"
+        }
+        foreach ($line in ($tx -split "`r?`n")) {
+            Write-Host ("      " + $line) -ForegroundColor Gray
+        }
+    }
+    Write-ThinDiv 'Cyan'
+    Write-Host ""
+}
+
+function Confirm-HubOperadorValidouCampos {
+    Write-Warn "O Hub so sera alterado apos sua confirmacao explicita."
+    Write-Host "  O campo Ocorrencia no Hub continua manual (nao enviado por este script)." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Se conferiu numero, estado, cliente, abertura e cada nota, digite:" -ForegroundColor Yellow
+    Write-Host "  CONFIRMO" -ForegroundColor Green
+    Write-Host "  (maiusculas ou minusculas). Qualquer outro texto ou Enter cancela." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Resposta: " -ForegroundColor Yellow -NoNewline
+    $t = Read-Host
+    return ($null -ne $t -and $t.Trim().ToUpperInvariant() -eq 'CONFIRMO')
 }
 
 function Invoke-SyncHub {
@@ -1566,43 +2094,57 @@ function Invoke-SyncHub {
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
     Write-Info "O campo Ocorrencia do Hub nao e alterado por esta sincronizacao (preenchimento manual)."
+    Write-Info "Cada POST/PUT exige revisao completa na tela, validacao automatica dos campos e digitacao exata CONFIRMO."
     Write-Host ""
 
     # Credenciais do Hub
     $hubDefault = if ($Cfg.HubBaseURL) { $Cfg.HubBaseURL } else { 'http://172.16.0.49:3210' }
     $hubUrl   = Read-Field "URL do Hub" $hubDefault
-    $hubEmail = Read-Field "Email Hub"  ""
-    Write-Host "  Senha Hub: " -ForegroundColor Yellow -NoNewline
+    $defEmail = if ($Cfg.HubEmail) { [string]$Cfg.HubEmail } else { '' }
+    $hubEmail = Read-Field "Email Hub" $defEmail
+    Write-Host "  Senha Hub [Enter = usar senha salva no script/config]: " -ForegroundColor Yellow -NoNewline
     $hubPass = Read-Host
+    if ([string]::IsNullOrWhiteSpace($hubPass)) {
+        $hubPass = if ($Cfg.HubPassword) { [string]$Cfg.HubPassword } else { '' }
+    }
     $hubUrl = $hubUrl.TrimEnd('/')
     Write-Host ""
+
+    if ([string]::IsNullOrWhiteSpace($hubEmail) -or [string]::IsNullOrWhiteSpace($hubPass)) {
+        Write-Err "Email ou senha Hub vazios. Ajuste em Configuracoes (opcao 5) ou nos padroes em Load-Config."
+        Pause-Screen
+        return
+    }
 
     # Login
     Write-Info "Conectando ao Hub..."
     try {
-        $loginResp = Hub-Login $hubUrl $hubEmail $hubPass
+        $null = Hub-Login $hubUrl $hubEmail $hubPass
         Write-OK "Login realizado no Hub."
     } catch {
         Write-Err ("Falha no login: " + $_); Pause-Screen; return
     }
 
-    # Tickets existentes no Hub
+    $null = Hub-VerifySession $hubUrl
+
+    # Tickets existentes no Hub (GET /api/relatorio/tickets com fallback e validacao)
     Write-Info "Buscando tickets no Hub..."
     $existingMap = @{}
-    try {
-        $hubTickets = Hub-Get $hubUrl "/api/relatorio"
-        if ($null -ne $hubTickets) {
-            if ($hubTickets -is [System.Array]) {
-                foreach ($ht in $hubTickets) {
-                    if ($ht.number) { $existingMap[$ht.number.ToString()] = $ht }
-                }
-            } elseif ($hubTickets.number) {
-                $existingMap[$hubTickets.number.ToString()] = $hubTickets
-            }
+    $hubListResult = Get-HubRelatorioTicketsList $hubUrl
+    foreach ($w in @($hubListResult.warnings)) {
+        if ($w) { Write-Warn $w }
+    }
+    if (-not $hubListResult.ok) {
+        Write-Warn "Nao foi possivel obter lista de tickets do Hub; sincronizacao tratara todos como novos (POST)."
+    } else {
+        Write-Info ("Fonte: " + $hubListResult.source)
+        if ($null -ne $hubListResult.syncVersion) {
+            Write-Info ("syncVersion: " + [string]$hubListResult.syncVersion + "  syncUpdatedAt: " + [string]$hubListResult.syncUpdatedAt)
         }
-        Write-OK ($existingMap.Count.ToString() + " tickets encontrados no Hub.")
-    } catch {
-        Write-Warn ("Nao foi possivel buscar tickets existentes: " + $_)
+        foreach ($t in @($hubListResult.tickets)) {
+            if ($t -and $t.number) { $existingMap[[string]$t.number] = $t }
+        }
+        Write-OK ($existingMap.Count.ToString() + " tickets encontrados no Hub (normalizados).")
     }
 
     # Tickets do OTRS (cache)
@@ -1639,19 +2181,26 @@ function Invoke-SyncHub {
             if (Test-HubRelatorioChanged $hub $payload) {
                 Write-Host ""
                 Write-Host ("  [UPD] #" + $num + " - diferenca em relacao ao Hub (estado, cliente, datas ou notas)") -ForegroundColor Cyan
-                Show-HubTicketPreview $payload
-                Write-Host "  Atualizar registro no Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
-                $r = Read-Host
-                if ($r -eq '' -or $r -match '^[Ss]') {
-                    try {
-                        Hub-Put $hubUrl ("/api/relatorio/" + $num) $payload | Out-Null
-                        Write-OK ("Atualizado: #" + $num)
-                        $nUpd++
-                    } catch {
-                        Write-Warn ("Falha: " + $_)
-                    }
-                } else {
-                    Write-Info ("Pulado: #" + $num) ; $nSkip++
+                Show-HubPayloadRevisaoCompleta $payload
+                $chk = Test-HubPayloadCompleto $payload
+                if (-not $chk.ok) {
+                    Write-Warn "Validacao automatica falhou; Hub NAO sera alterado para este chamado:"
+                    foreach ($pr in @($chk.problemas)) { Write-Warn ("  - " + $pr) }
+                    Write-Info ("Corrija na origem (OTRS/relatorio) e regenere o cache antes de sincronizar de novo: #" + $num)
+                    $nSkip++
+                    continue
+                }
+                if (-not (Confirm-HubOperadorValidouCampos)) {
+                    Write-Info ("Envio cancelado pelo operador: #" + $num)
+                    $nSkip++
+                    continue
+                }
+                try {
+                    Hub-Put $hubUrl ("/api/relatorio/" + $num) $payload | Out-Null
+                    Write-OK ("Atualizado: #" + $num)
+                    $nUpd++
+                } catch {
+                    Write-Warn ("Falha: " + $_)
                 }
             } else {
                 Write-Host ("  [=] #" + $num + " sem alteracoes") -ForegroundColor DarkGray
@@ -1662,26 +2211,33 @@ function Invoke-SyncHub {
             Write-Host ""
             Write-ThinDiv 'Yellow'
             Write-Host "  NOVO TICKET:" -ForegroundColor Yellow
-            Show-HubTicketPreview $payload
-            Write-Host "  Adicionar ao Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
-            $r = Read-Host
-            if ($r -eq '' -or $r -match '^[Ss]') {
-                try {
-                    Hub-Post $hubUrl "/api/relatorio" $payload | Out-Null
-                    Write-OK ("Adicionado: #" + $num)
-                    $nNew++
-                } catch {
-                    Write-Warn ("Falha: " + $_)
-                }
-            } else {
-                Write-Info ("Pulado: #" + $num) ; $nSkip++
+            Show-HubPayloadRevisaoCompleta $payload
+            $chk = Test-HubPayloadCompleto $payload
+            if (-not $chk.ok) {
+                Write-Warn "Validacao automatica falhou; Hub NAO recebera este chamado:"
+                foreach ($pr in @($chk.problemas)) { Write-Warn ("  - " + $pr) }
+                Write-Info ("Corrija na origem e regenere o cache: #" + $num)
+                $nSkip++
+                continue
+            }
+            if (-not (Confirm-HubOperadorValidouCampos)) {
+                Write-Info ("Envio cancelado pelo operador: #" + $num)
+                $nSkip++
+                continue
+            }
+            try {
+                Hub-Post $hubUrl "/api/relatorio" $payload | Out-Null
+                Write-OK ("Adicionado: #" + $num)
+                $nNew++
+            } catch {
+                Write-Warn ("Falha: " + $_)
             }
         }
     }
 
     Write-Host ""
     Write-Divider 'DarkGray'
-    Write-OK ($nNew.ToString() + " adicionados   " + $nUpd.ToString() + " atualizados   " + $nSkip.ToString() + " sem alteracao")
+    Write-OK ($nNew.ToString() + " adicionados   " + $nUpd.ToString() + " atualizados   " + $nSkip.ToString() + " sem envio ou sem alteracao")
     Pause-Screen
 }
 
@@ -1727,6 +2283,7 @@ $script:CcoConfig = @{
         'Status:\s*(OK|PROBLEM|DISASTER)'
     )
 }
+$script:_AutoNoteRxList = $null
 
 # =============================================================================
 # Configuracoes
@@ -1744,6 +2301,16 @@ function Show-Configuracoes {
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
     if (-not $Cfg.HubBaseURL) { $Cfg.HubBaseURL = 'http://172.16.0.49:3210' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
+    if ($null -eq $Cfg.HubEmail) { $Cfg.HubEmail = '' }
+    $Cfg.HubEmail = Read-Field "Email Hub (login relatorio)" $Cfg.HubEmail
+    Write-Host "  Senha Hub [Enter = manter atual]: " -ForegroundColor Yellow -NoNewline
+    $hubPwNew = Read-Host
+    if ($hubPwNew) { $Cfg.HubPassword = $hubPwNew }
+    elseif ($null -eq $Cfg.HubPassword) { $Cfg.HubPassword = '' }
+    if ($null -eq $Cfg.SleepArticleMs) { $Cfg.SleepArticleMs = 5 }
+    if ($null -eq $Cfg.SleepTicketMs)  { $Cfg.SleepTicketMs  = 15 }
+    $Cfg.SleepArticleMs = [int](Read-Field "Pausa entre notas ao exportar (ms, 0=sem)" $Cfg.SleepArticleMs.ToString())
+    $Cfg.SleepTicketMs  = [int](Read-Field "Pausa entre tickets ao exportar (ms, 0=sem)" $Cfg.SleepTicketMs.ToString())
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
@@ -1776,6 +2343,341 @@ function Show-SalvarCredenciais {
 }
 
 # =============================================================================
+# Diagnostico de rede (ping / tracert) - didatico; destino validado
+# =============================================================================
+
+function Test-IsWindowsHost {
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $null -ne $PSVersionTable.Platform) {
+        return $PSVersionTable.Platform -eq 'Win32NT'
+    }
+    return $env:OS -eq 'Windows_NT'
+}
+
+function Test-DestinoRedeSeguro {
+    param([string]$Texto)
+    if ([string]::IsNullOrWhiteSpace($Texto)) { return $false }
+    $t = $Texto.Trim()
+    if ($t.Length -gt 253) { return $false }
+    if ($t -match '[\s;|&`$<>''"\\]') { return $false }
+    if ($t -notmatch '^[a-zA-Z0-9.\-:\[\]%_]+$') { return $false }
+    return $true
+}
+
+function Read-DestinoRede {
+    param([string]$TituloAjuda)
+    Write-Host ""
+    Write-Info $TituloAjuda
+    Write-Host "  Exemplos validos:  google.com   8.8.8.8   znuny.suaempresa.local" -ForegroundColor DarkGray
+    Write-Host "  (Use apenas letras, numeros, pontos, hifens e dois-pontos em IPv6.)" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Destino: " -ForegroundColor Yellow -NoNewline
+    $d = Read-Host
+    return $(if ($null -eq $d) { '' } else { $d.Trim() })
+}
+
+function Show-PingDidatico {
+    Write-Banner
+    Write-Centered "-- TESTE DE PING --" 'White'
+    Write-Host ""
+    Write-Host "  O que e o ping?" -ForegroundColor Cyan
+    Write-Host "  E um teste simples: seu computador envia alguns pacotes pequenos ate o"
+    Write-Host "  destino e espera resposta. Se houver resposta, em geral o caminho ate la"
+    Write-Host "  esta funcionando. O tempo em milissegundos (ms) indica atraso (latencia)."
+    Write-Host ""
+    Write-Host "  O que NAO e o ping?" -ForegroundColor DarkGray
+    Write-Host "  Nao prova que um site ou servico (porta) esta no ar - so testa alcance"
+    Write-Host "  basico na rede. Alguns firewalls bloqueiam ping; falha nem sempre e problema seu."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o host ou IP que deseja testar (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio. Use apenas nome ou IP, sem espacos ou caracteres especiais."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Executando ping (4 tentativas) para: " + $dest)
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        if (Test-IsWindowsHost) {
+            $pingExe = Join-Path $env:SystemRoot 'System32\ping.exe'
+            if (-not (Test-Path -LiteralPath $pingExe)) { throw "ping.exe nao encontrado." }
+            $proc = Start-Process -FilePath $pingExe -ArgumentList @('-n', '4', $dest) -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warn ("Ping finalizou com codigo " + $proc.ExitCode.ToString() + " (nem sempre indica falha total; leia as linhas acima).")
+            }
+        } else {
+            $pingCmd = Get-Command ping -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            $pingPath = $null
+            if ($pingCmd) {
+                if ($pingCmd.PSObject.Properties['Path'] -and $pingCmd.Path) { $pingPath = [string]$pingCmd.Path }
+                elseif ($pingCmd.PSObject.Properties['Source'] -and $pingCmd.Source) { $pingPath = [string]$pingCmd.Source }
+            }
+            if (-not $pingPath) { throw "Comando ping nao encontrado neste sistema." }
+            $proc = Start-Process -FilePath $pingPath -ArgumentList @('-c', '4', $dest) -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warn ("Ping finalizou com codigo " + $proc.ExitCode.ToString() + ".")
+            }
+        }
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: tempos estaveis e baixos (ex.: abaixo de 50 ms na mesma cidade) costumam ser bons sinais."
+    Pause-Screen
+}
+
+function Show-TracertDidatico {
+    Write-Banner
+    Write-Centered "-- TRACERT (CAMINHO / ROTA) --" 'White'
+    Write-Host ""
+    Write-Host "  O que e o tracert?" -ForegroundColor Cyan
+    Write-Host "  (No Linux costuma chamar-se traceroute - aqui usamos o comando do sistema.)"
+    Write-Host "  Ele mostra cada ""salto"" (roteador) entre o seu PC e o destino, em ordem."
+    Write-Host "  Assim da para ver em qual trecho a rota demora mais ou para de responder."
+    Write-Host ""
+    Write-Host "  Como ler rapidamente:" -ForegroundColor Yellow
+    Write-Host "  - Cada linha e um passo na rede; tres tempos sao tres medicoes para aquele salto."
+    Write-Host "  - ""*"" ou ""Request timed out"" em um salto nem sempre e problema - alguns roteadores nao respondem a ping."
+    Write-Host "  - Se o destino final nunca aparece, pode haver bloqueio ou caminho interrompido."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o host ou IP para rastrear a rota (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio. Use apenas nome ou IP, sem espacos ou caracteres especiais."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Rastreando rota (ate 30 saltos) para: " + $dest)
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        if (Test-IsWindowsHost) {
+            $exe = Join-Path $env:SystemRoot 'System32\tracert.exe'
+            if (-not (Test-Path -LiteralPath $exe)) { throw "tracert.exe nao encontrado." }
+            $proc = Start-Process -FilePath $exe -ArgumentList @('-h', '30', '-w', '2000', $dest) -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warn ("Tracert finalizou com codigo " + $proc.ExitCode.ToString() + ".")
+            }
+        } else {
+            $tr = Get-Command traceroute -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            $trPath = $null
+            if ($tr) {
+                if ($tr.PSObject.Properties['Path'] -and $tr.Path) { $trPath = [string]$tr.Path }
+                elseif ($tr.PSObject.Properties['Source'] -and $tr.Source) { $trPath = [string]$tr.Source }
+            }
+            if ($trPath) {
+                $proc = Start-Process -FilePath $trPath -ArgumentList @('-m', '30', $dest) -NoNewWindow -Wait -PassThru
+            } else {
+                $tp = Get-Command tracepath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                $tpPath = $null
+                if ($tp) {
+                    if ($tp.PSObject.Properties['Path'] -and $tp.Path) { $tpPath = [string]$tp.Path }
+                    elseif ($tp.PSObject.Properties['Source'] -and $tp.Source) { $tpPath = [string]$tp.Source }
+                }
+                if ($tpPath) {
+                    $proc = Start-Process -FilePath $tpPath -ArgumentList @($dest) -NoNewWindow -Wait -PassThru
+                } else {
+                    throw "Nao encontrei traceroute nem tracepath. Instale um deles ou use o menu no Windows."
+                }
+            }
+        }
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: compare com o ping - se o ping funciona mas o tracert trava no meio, ainda pode haver rota assimetrica ou filtros."
+    Pause-Screen
+}
+
+function Test-PortaTcpValida {
+    param([string]$Texto)
+    if ([string]::IsNullOrWhiteSpace($Texto)) { return $false }
+    $t = $Texto.Trim()
+    if ($t -notmatch '^\d+$') { return $false }
+    $n = 0
+    if (-not [int]::TryParse($t, [ref]$n)) { return $false }
+    return ($n -ge 1 -and $n -le 65535)
+}
+
+function Show-NslookupDidatico {
+    Write-Banner
+    Write-Centered "-- CONSULTA DNS (NSLOOKUP / HOST) --" 'White'
+    Write-Host ""
+    Write-Host "  O que e uma consulta DNS?" -ForegroundColor Cyan
+    Write-Host "  O DNS traduz nomes (ex.: znuny.empresa.com) em enderecos IP. Se esta etapa"
+    Write-Host "  falha, navegadores e aplicacoes podem nao achar o servidor mesmo com rede ok."
+    Write-Host ""
+    Write-Host "  O que ver no resultado:" -ForegroundColor Yellow
+    Write-Host "  - Em geral aparece um ou mais enderecos IPv4 (A) ou IPv6 (AAAA)."
+    Write-Host "  - Se aparecer ""NXDOMAIN"" ou ""not found"", o nome nao existe naquele servidor DNS."
+    Write-Host "  - Se o IP parece errado, pode ser cache DNS ou entrada antiga no servidor."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o nome de host ou IP para consultar no DNS (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Consultando DNS para: " + $dest)
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        if (Test-IsWindowsHost) {
+            $exe = Join-Path $env:SystemRoot 'System32\nslookup.exe'
+            if (-not (Test-Path -LiteralPath $exe)) { throw "nslookup.exe nao encontrado." }
+            $null = Start-Process -FilePath $exe -ArgumentList @($dest) -NoNewWindow -Wait -PassThru
+        } else {
+            $hostAppCmd = Get-Command host -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            $path = $null
+            if ($hostAppCmd) {
+                if ($hostAppCmd.PSObject.Properties['Path'] -and $hostAppCmd.Path) { $path = [string]$hostAppCmd.Path }
+                elseif ($hostAppCmd.PSObject.Properties['Source'] -and $hostAppCmd.Source) { $path = [string]$hostAppCmd.Source }
+            }
+            if ($path) {
+                $null = Start-Process -FilePath $path -ArgumentList @('-W', '3', $dest) -NoNewWindow -Wait -PassThru
+            } else {
+                $digCmd = Get-Command dig -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                $digPath = $null
+                if ($digCmd) {
+                    if ($digCmd.PSObject.Properties['Path'] -and $digCmd.Path) { $digPath = [string]$digCmd.Path }
+                    elseif ($digCmd.PSObject.Properties['Source'] -and $digCmd.Source) { $digPath = [string]$digCmd.Source }
+                }
+                if ($digPath) {
+                    $null = Start-Process -FilePath $digPath -ArgumentList @('+time=2', '+tries=1', $dest) -NoNewWindow -Wait -PassThru
+                } else {
+                    throw "Nao encontrei host nem dig. No Linux instale bind-utils ou use o menu no Windows."
+                }
+            }
+        }
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: se o ping ao IP funciona mas o nome nao resolve, foque no DNS (servidor interno, hosts, VPN)."
+    Pause-Screen
+}
+
+function Show-TestNetConnectionDidatico {
+    Write-Banner
+    Write-Centered "-- TESTE DE PORTA TCP --" 'White'
+    Write-Host ""
+    if (-not (Test-IsWindowsHost)) {
+        Write-Host "  O Test-NetConnection e um cmdlet do Windows PowerShell." -ForegroundColor Yellow
+        Write-Host "  Em Linux/macOS, equivalente aproximado no terminal:  nc -vz <host> <porta>" -ForegroundColor DarkGray
+        Write-Host "  ou:  curl -v telnet://host:porta" -ForegroundColor DarkGray
+        Pause-Screen
+        return
+    }
+    if (-not (Get-Command Test-NetConnection -ErrorAction SilentlyContinue)) {
+        Write-Err "Test-NetConnection nao disponivel nesta sessao (modulo NetTCPIP)."
+        Pause-Screen
+        return
+    }
+
+    Write-Host "  O que este teste faz?" -ForegroundColor Cyan
+    Write-Host "  Tenta abrir uma conexao TCP ate a porta informada no destino - como um cliente"
+    Write-Host "  checando se alguem ""escuta"" naquela porta. E diferente do ping (ICMP)."
+    Write-Host ""
+    Write-Host "  Interpretacao rapida:" -ForegroundColor Yellow
+    Write-Host "  - TcpTestSucceeded = True: a porta aceitou conexao (servico provavelmente ativo ou firewall permitiu)."
+    Write-Host "  - False: bloqueio de firewall, servico parado, ou host inalcancavel."
+    Write-Host "  - Ping pode falhar e a porta 443 ainda responder (ICMP bloqueado e HTTPS liberado)."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o host ou IP do servidor (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  Porta TCP (1-65535). Exemplos: 80 HTTP, 443 HTTPS, 22 SSH, 5985 WinRM: " -ForegroundColor Yellow -NoNewline
+    $portStr = Read-Host
+    if (-not (Test-PortaTcpValida $portStr)) {
+        Write-Err "Porta invalida. Use apenas numeros de 1 a 65535."
+        Pause-Screen
+        return
+    }
+    $portNum = [int]$portStr.Trim()
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Test-NetConnection -ComputerName " + $dest + " -Port " + $portNum.ToString())
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        $tncParams = @{
+            ComputerName   = $dest
+            Port             = $portNum
+            WarningAction    = 'Continue'
+            ErrorAction      = 'Stop'
+        }
+        if ((Get-Command Test-NetConnection).Parameters.Keys -contains 'InformationLevel') {
+            $tncParams.InformationLevel = 'Detailed'
+        }
+        $r = Test-NetConnection @tncParams
+        $r | Format-List ComputerName, RemoteAddress, RemotePort, TcpTestSucceeded, PingSucceeded, InterfaceAlias
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: para o Znuny/HTTP em geral teste a porta 80 ou 443 conforme a URL que voce usa no navegador."
+    Pause-Screen
+}
+
+function Show-MenuDiagnosticoRede {
+    while ($true) {
+        Write-Banner
+        Write-Centered "-- DIAGNOSTICO DE REDE --" 'White'
+        Write-Host ""
+        Write-Host "  Escolha uma ferramenta. Em todas voce informa apenas host/IP (e na opcao 4 tambem a porta)." -ForegroundColor DarkGray
+        Write-Host ""
+        Write-MenuOpt '1' 'Ping'                    'Green'    'ICMP: alcance e latencia (4 tentativas)'
+        Write-MenuOpt '2' 'Tracert / rota'        'Green'    'Saltos ate o destino (ate 30 hops)'
+        Write-MenuOpt '3' 'Consulta DNS'          'Cyan'     'nslookup (Windows) ou host/dig (Linux)'
+        Write-MenuOpt '4' 'Teste de porta TCP'    'Cyan'     'Windows: Test-NetConnection (host + porta)'
+        Write-Host ""
+        Write-MenuOpt '0' 'Voltar'                  'DarkGray' ''
+        Write-Host ""
+        Write-ThinDiv 'DarkGray'
+        Write-Host ""
+        Write-Host "  Opcao: " -ForegroundColor Cyan -NoNewline
+        $ch = (Read-Host).Trim()
+        switch ($ch) {
+            '1' { Show-PingDidatico }
+            '2' { Show-TracertDidatico }
+            '3' { Show-NslookupDidatico }
+            '4' { Show-TestNetConnectionDidatico }
+            '0' { return }
+            default {
+                Write-Warn "Opcao invalida."
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+}
+
+# =============================================================================
 # Menu principal
 # =============================================================================
 
@@ -1796,9 +2698,11 @@ function Show-MainMenu {
         Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
-        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Perfil de busca, cache, pasta de saida, URL do Hub'
+        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub, pausas HTTP (performance)'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
         Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login /api/login e envio para /api/relatorio (sem ocorrencia)'
+        Write-Host ""
+        Write-MenuOpt '8' 'Diagnostico de rede'   'Green'    'Submenu: ping, tracert, DNS e teste de porta TCP (didatico)'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
@@ -1815,6 +2719,7 @@ function Show-MainMenu {
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
             '7' { Invoke-SyncHub $Cfg $ExportScript }
+            '8' { Show-MenuDiagnosticoRede }
             '0' {
                 Write-Banner
                 Write-Centered "Ate logo!" 'DarkCyan'
