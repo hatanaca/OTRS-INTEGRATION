@@ -501,7 +501,6 @@ function Ensure-ZnunyParserRegexes {
     $script:_RxCustClienteTitle = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
     $script:_RxCustClienteP = [regex]::new('(?s)<label[^>]*>\s*Cliente\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
     $script:_RxUnitUsuarioP = [regex]::new('(?s)<label[^>]*>\s*Usu.rio\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
-    $script:_RxUnitNomeSuffixGen = [regex]::new('-\s*([^\s-][^-]*)\s*$', $ro)
     $script:_RxHtmlTagProbe = [regex]::new('<[a-zA-Z!/]', $ro)
     $dynT = [System.Collections.Generic.List[regex]]::new()
     $dynP = [System.Collections.Generic.List[regex]]::new()
@@ -600,6 +599,46 @@ function Test-UnidadeTextoUtil {
     return $false
 }
 
+# Ex.: "ROYAL FIC - UNIDADE 50 - PORTO NACIONAL - 27163" -> "ROYAL FIC - UNIDADE 50 - PORTO NACIONAL" (remove codigo final)
+function Get-UnidadeFromNomeClienteString {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($seg in ($Text.Trim() -split '\s*-\s*')) {
+        $s = $seg.Trim()
+        if ($s) { $parts.Add($s) }
+    }
+    while ($parts.Count -gt 1) {
+        $last = $parts[$parts.Count - 1]
+        if ($last -match '^\d+$') { $parts.RemoveAt($parts.Count - 1) }
+        else { break }
+    }
+    if ($parts.Count -eq 0) { return '' }
+    $out = [string]::Join(' - ', $parts).Trim()
+    if (Test-UnidadeTextoUtil $out) { return $out }
+    return ''
+}
+
+function Get-UnidadeFromNomeClienteHtml {
+    param(
+        [string]$HTML,
+        [string]$ExcludeEqualTo = $null
+    )
+    Ensure-ZnunyParserRegexes
+    $raw = ''
+    if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
+        $raw = $m.Groups[1].Value.Trim()
+    }
+    elseif (($m = $script:_RxCustNomeP.Match($HTML)).Success) {
+        $raw = (Remove-Html $m.Groups[1].Value).Trim()
+    }
+    if (-not $raw) { return '' }
+    $u = Get-UnidadeFromNomeClienteString $raw
+    if (-not $u) { return '' }
+    if ($ExcludeEqualTo -and ($u -eq $ExcludeEqualTo.Trim())) { return '' }
+    return $u
+}
+
 function Try-MatchUnidadeDescriptive {
     param(
         [string]$HTML,
@@ -621,6 +660,8 @@ function Try-MatchUnidadeDescriptive {
             return $val
         }
     }
+    $fromNome = Get-UnidadeFromNomeClienteHtml $HTML $ExcludeEqualTo
+    if ($fromNome) { return $fromNome }
     if (($m = $script:_RxUnidadeAltUsuario.Match($HTML)).Success) {
         $val = $m.Groups[1].Value.Trim()
         if ($val -and $val -notmatch '@' -and (Test-UnidadeTextoUtil $val)) {
@@ -631,15 +672,6 @@ function Try-MatchUnidadeDescriptive {
         $val = (Remove-Html $m.Groups[1].Value).Trim()
         if ($val -and $val -notmatch '@' -and (Test-UnidadeTextoUtil $val)) {
             if (-not $ExcludeEqualTo -or ($val -ne $ExcludeEqualTo.Trim())) { return $val }
-        }
-    }
-    if (($m = $script:_RxCustNomeTitle.Match($HTML)).Success) {
-        $nome = $m.Groups[1].Value.Trim()
-        if (($m2 = $script:_RxUnitNomeSuffixGen.Match($nome)).Success) {
-            $seg = $m2.Groups[1].Value.Trim()
-            if (Test-UnidadeTextoUtil $seg) {
-                if (-not $ExcludeEqualTo -or ($seg -ne $ExcludeEqualTo.Trim())) { return $seg }
-            }
         }
     }
     return ''
