@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Menu-OTRS.ps1 - Interface TUI para relatorios CCO (Znuny/OTRS)
 # Versao unificada - Export-CcoReport incorporado
 # Compativel com Windows PowerShell 5.1 e PowerShell 7+
@@ -110,7 +110,7 @@ function Load-Config {
         OutputPath      = $PWD.Path
         SearchPath      = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
         HubBaseURL      = 'http://172.16.0.49:3210'
-        # Credenciais Hub — preenchimento automatico na sincronizacao (texto claro: nao commitar em repo publico).
+        # Credenciais Hub - preenchimento automatico na sincronizacao (texto claro: nao commitar em repo publico).
         HubEmail        = 'thiago.ratanaka@microset.net.br'
         HubPassword     = 'SenhaN2M7@'
         SleepArticleMs  = 5
@@ -378,7 +378,7 @@ class OtrsClient {
 
     hidden [string] GetResponseText($response) {
         if (-not $response) { return '' }
-        # Preferir Content (string ja materializada) — mais rapido que ler RawContentStream inteiro.
+        # Preferir Content (string ja materializada) - mais rapido que ler RawContentStream inteiro.
         $c = $response.Content
         if ($null -ne $c -and $c.Length -gt 0) { return [string]$c }
         if (-not $response.RawContentStream) { return '' }
@@ -499,7 +499,7 @@ function Ensure-ZnunyParserRegexes {
     }
     $script:_RxChallengeTokens = $tokList
 
-    # Cliente / unidade (HTML principal e widget) — evita [regex]::Match repetido por ticket
+    # Cliente / unidade (HTML principal e widget) - evita [regex]::Match repetido por ticket
     $script:_RxCustNomeTitle = [regex]::new('(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*<p[^>]+title="([^"]+)"', $roIc)
     $script:_RxCustNomeP = [regex]::new('(?s)<label[^>]*>\s*Nome\s*:\s*</label>\s*(?:<[^>]+>\s*)*<p[^>]*>(.*?)</p>', $roIc)
     $script:_RxCustNomeSuffixTail = [regex]::new('\s*-\s*\d+\s*$', $ro)
@@ -1714,7 +1714,7 @@ function Show-VisualizadorMenu {
 
 
 # =============================================================================
-# Integracao com Hub (http://172.16.0.49:3210) — API externa: validacao e timeouts
+# Integracao com Hub (http://172.16.0.49:3210) - API externa: validacao e timeouts
 # =============================================================================
 $script:HubSession = $null
 $script:HubRequestTimeoutSec = 90
@@ -2238,7 +2238,7 @@ function Show-SalvarCredenciais {
 }
 
 # =============================================================================
-# Diagnostico de rede (ping / tracert) — didatico; destino validado
+# Diagnostico de rede (ping / tracert) - didatico; destino validado
 # =============================================================================
 
 function Test-IsWindowsHost {
@@ -2280,7 +2280,7 @@ function Show-PingDidatico {
     Write-Host "  esta funcionando. O tempo em milissegundos (ms) indica atraso (latencia)."
     Write-Host ""
     Write-Host "  O que NAO e o ping?" -ForegroundColor DarkGray
-    Write-Host "  Nao prova que um site ou servico (porta) esta no ar — so testa alcance"
+    Write-Host "  Nao prova que um site ou servico (porta) esta no ar - so testa alcance"
     Write-Host "  basico na rede. Alguns firewalls bloqueiam ping; falha nem sempre e problema seu."
     Write-Host ""
 
@@ -2332,13 +2332,13 @@ function Show-TracertDidatico {
     Write-Centered "-- TRACERT (CAMINHO / ROTA) --" 'White'
     Write-Host ""
     Write-Host "  O que e o tracert?" -ForegroundColor Cyan
-    Write-Host "  (No Linux costuma chamar-se traceroute — aqui usamos o comando do sistema.)"
+    Write-Host "  (No Linux costuma chamar-se traceroute - aqui usamos o comando do sistema.)"
     Write-Host "  Ele mostra cada ""salto"" (roteador) entre o seu PC e o destino, em ordem."
     Write-Host "  Assim da para ver em qual trecho a rota demora mais ou para de responder."
     Write-Host ""
     Write-Host "  Como ler rapidamente:" -ForegroundColor Yellow
     Write-Host "  - Cada linha e um passo na rede; tres tempos sao tres medicoes para aquele salto."
-    Write-Host "  - ""*"" ou ""Request timed out"" em um salto nem sempre e problema — alguns roteadores nao respondem a ping."
+    Write-Host "  - ""*"" ou ""Request timed out"" em um salto nem sempre e problema - alguns roteadores nao respondem a ping."
     Write-Host "  - Se o destino final nunca aparece, pode haver bloqueio ou caminho interrompido."
     Write-Host ""
 
@@ -2391,7 +2391,7 @@ function Show-TracertDidatico {
     }
 
     Write-Host ""
-    Write-Info "Dica: compare com o ping — se o ping funciona mas o tracert trava no meio, ainda pode haver rota assimétrica ou filtros."
+    Write-Info "Dica: compare com o ping - se o ping funciona mas o tracert trava no meio, ainda pode haver rota assimetrica ou filtros."
     Pause-Screen
 }
 
@@ -2487,7 +2487,7 @@ function Show-TestNetConnectionDidatico {
     }
 
     Write-Host "  O que este teste faz?" -ForegroundColor Cyan
-    Write-Host "  Tenta abrir uma conexao TCP ate a porta informada no destino — como um cliente"
+    Write-Host "  Tenta abrir uma conexao TCP ate a porta informada no destino - como um cliente"
     Write-Host "  checando se alguem ""escuta"" naquela porta. E diferente do ping (ICMP)."
     Write-Host ""
     Write-Host "  Interpretacao rapida:" -ForegroundColor Yellow
