@@ -1730,6 +1730,7 @@ function Hub-InvokeWebRequest {
         [string]$SessionVariable = $null
     )
     if ($TimeoutSec -le 0) { $TimeoutSec = $script:HubRequestTimeoutSec }
+    $verb = $Method.ToUpperInvariant()
     $p = @{
         Uri             = $Uri
         Method          = $Method
@@ -1740,10 +1741,32 @@ function Hub-InvokeWebRequest {
     if ($SessionVariable) {
         $p.SessionVariable = $SessionVariable
     } elseif ($WebSession) {
-        $p.WebSession = $WebSession
+        # Windows PowerShell 5.1: sessao apos POST JSON pode manter Content-Type no WebSession e o
+        # proximo GET falha com "Nao e possivel enviar um conteudo com este tipo de verbo".
+        # Para GET/HEAD, nao passar WebSession; enviar so Cookie (e Authorization se existir).
+        if ($verb -eq 'GET' -or $verb -eq 'HEAD') {
+            $hdr = @{}
+            try {
+                $uObj = [Uri]$Uri
+                $ck = $WebSession.Cookies.GetCookieHeader($uObj)
+                if ($ck) { $hdr['Cookie'] = $ck }
+            } catch { }
+            if ($WebSession.Headers) {
+                foreach ($key in @($WebSession.Headers.Keys)) {
+                    if ($key -match '^(?i)authorization$') {
+                        $hdr[$key] = [string]$WebSession.Headers[$key]
+                    }
+                }
+            }
+            if ($hdr.Count -gt 0) { $p.Headers = $hdr }
+        } else {
+            $p.WebSession = $WebSession
+        }
     }
-    if ($ContentType) { $p.ContentType = $ContentType }
-    if ($null -ne $Body) { $p.Body = $Body }
+    if ($verb -ne 'GET' -and $verb -ne 'HEAD') {
+        if ($ContentType) { $p.ContentType = $ContentType }
+        if ($null -ne $Body -and $Body -ne '') { $p.Body = $Body }
+    }
     $resp = Invoke-WebRequest @p
     if ($SessionVariable) {
         $script:HubSession = Get-Variable -Name $SessionVariable -Scope Local -ValueOnly -ErrorAction Stop
