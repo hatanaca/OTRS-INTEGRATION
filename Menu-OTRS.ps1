@@ -2231,7 +2231,7 @@ function Test-DestinoRedeSeguro {
     $t = $Texto.Trim()
     if ($t.Length -gt 253) { return $false }
     if ($t -match '[\s;|&`$<>''"\\]') { return $false }
-    if ($t -notmatch '^[a-zA-Z0-9.\-:\[\]%]+$') { return $false }
+    if ($t -notmatch '^[a-zA-Z0-9.\-:\[\]%_]+$') { return $false }
     return $true
 }
 
@@ -2372,6 +2372,183 @@ function Show-TracertDidatico {
     Pause-Screen
 }
 
+function Test-PortaTcpValida {
+    param([string]$Texto)
+    if ([string]::IsNullOrWhiteSpace($Texto)) { return $false }
+    $t = $Texto.Trim()
+    if ($t -notmatch '^\d+$') { return $false }
+    $n = 0
+    if (-not [int]::TryParse($t, [ref]$n)) { return $false }
+    return ($n -ge 1 -and $n -le 65535)
+}
+
+function Show-NslookupDidatico {
+    Write-Banner
+    Write-Centered "-- CONSULTA DNS (NSLOOKUP / HOST) --" 'White'
+    Write-Host ""
+    Write-Host "  O que e uma consulta DNS?" -ForegroundColor Cyan
+    Write-Host "  O DNS traduz nomes (ex.: znuny.empresa.com) em enderecos IP. Se esta etapa"
+    Write-Host "  falha, navegadores e aplicacoes podem nao achar o servidor mesmo com rede ok."
+    Write-Host ""
+    Write-Host "  O que ver no resultado:" -ForegroundColor Yellow
+    Write-Host "  - Em geral aparece um ou mais enderecos IPv4 (A) ou IPv6 (AAAA)."
+    Write-Host "  - Se aparecer ""NXDOMAIN"" ou ""not found"", o nome nao existe naquele servidor DNS."
+    Write-Host "  - Se o IP parece errado, pode ser cache DNS ou entrada antiga no servidor."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o nome de host ou IP para consultar no DNS (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Consultando DNS para: " + $dest)
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        if (Test-IsWindowsHost) {
+            $exe = Join-Path $env:SystemRoot 'System32\nslookup.exe'
+            if (-not (Test-Path -LiteralPath $exe)) { throw "nslookup.exe nao encontrado." }
+            $null = Start-Process -FilePath $exe -ArgumentList @($dest) -NoNewWindow -Wait -PassThru
+        } else {
+            $hostAppCmd = Get-Command host -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            $path = $null
+            if ($hostAppCmd) {
+                if ($hostAppCmd.PSObject.Properties['Path'] -and $hostAppCmd.Path) { $path = [string]$hostAppCmd.Path }
+                elseif ($hostAppCmd.PSObject.Properties['Source'] -and $hostAppCmd.Source) { $path = [string]$hostAppCmd.Source }
+            }
+            if ($path) {
+                $null = Start-Process -FilePath $path -ArgumentList @('-W', '3', $dest) -NoNewWindow -Wait -PassThru
+            } else {
+                $digCmd = Get-Command dig -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                $digPath = $null
+                if ($digCmd) {
+                    if ($digCmd.PSObject.Properties['Path'] -and $digCmd.Path) { $digPath = [string]$digCmd.Path }
+                    elseif ($digCmd.PSObject.Properties['Source'] -and $digCmd.Source) { $digPath = [string]$digCmd.Source }
+                }
+                if ($digPath) {
+                    $null = Start-Process -FilePath $digPath -ArgumentList @('+time=2', '+tries=1', $dest) -NoNewWindow -Wait -PassThru
+                } else {
+                    throw "Nao encontrei host nem dig. No Linux instale bind-utils ou use o menu no Windows."
+                }
+            }
+        }
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: se o ping ao IP funciona mas o nome nao resolve, foque no DNS (servidor interno, hosts, VPN)."
+    Pause-Screen
+}
+
+function Show-TestNetConnectionDidatico {
+    Write-Banner
+    Write-Centered "-- TESTE DE PORTA TCP --" 'White'
+    Write-Host ""
+    if (-not (Test-IsWindowsHost)) {
+        Write-Host "  O Test-NetConnection e um cmdlet do Windows PowerShell." -ForegroundColor Yellow
+        Write-Host "  Em Linux/macOS, equivalente aproximado no terminal:  nc -vz <host> <porta>" -ForegroundColor DarkGray
+        Write-Host "  ou:  curl -v telnet://host:porta" -ForegroundColor DarkGray
+        Pause-Screen
+        return
+    }
+    if (-not (Get-Command Test-NetConnection -ErrorAction SilentlyContinue)) {
+        Write-Err "Test-NetConnection nao disponivel nesta sessao (modulo NetTCPIP)."
+        Pause-Screen
+        return
+    }
+
+    Write-Host "  O que este teste faz?" -ForegroundColor Cyan
+    Write-Host "  Tenta abrir uma conexao TCP ate a porta informada no destino — como um cliente"
+    Write-Host "  checando se alguem ""escuta"" naquela porta. E diferente do ping (ICMP)."
+    Write-Host ""
+    Write-Host "  Interpretacao rapida:" -ForegroundColor Yellow
+    Write-Host "  - TcpTestSucceeded = True: a porta aceitou conexao (servico provavelmente ativo ou firewall permitiu)."
+    Write-Host "  - False: bloqueio de firewall, servico parado, ou host inalcancavel."
+    Write-Host "  - Ping pode falhar e a porta 443 ainda responder (ICMP bloqueado e HTTPS liberado)."
+    Write-Host ""
+
+    $dest = Read-DestinoRede "Digite o host ou IP do servidor (somente o destino)."
+    if (-not (Test-DestinoRedeSeguro $dest)) {
+        Write-Err "Destino invalido ou vazio."
+        Pause-Screen
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  Porta TCP (1-65535). Exemplos: 80 HTTP, 443 HTTPS, 22 SSH, 5985 WinRM: " -ForegroundColor Yellow -NoNewline
+    $portStr = Read-Host
+    if (-not (Test-PortaTcpValida $portStr)) {
+        Write-Err "Porta invalida. Use apenas numeros de 1 a 65535."
+        Pause-Screen
+        return
+    }
+    $portNum = [int]$portStr.Trim()
+
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Info ("Test-NetConnection -ComputerName " + $dest + " -Port " + $portNum.ToString())
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+
+    try {
+        $tncParams = @{
+            ComputerName   = $dest
+            Port             = $portNum
+            WarningAction    = 'Continue'
+            ErrorAction      = 'Stop'
+        }
+        if ((Get-Command Test-NetConnection).Parameters.Keys -contains 'InformationLevel') {
+            $tncParams.InformationLevel = 'Detailed'
+        }
+        $r = Test-NetConnection @tncParams
+        $r | Format-List ComputerName, RemoteAddress, RemotePort, TcpTestSucceeded, PingSucceeded, InterfaceAlias
+    } catch {
+        Write-Err $_.Exception.Message
+    }
+
+    Write-Host ""
+    Write-Info "Dica: para o Znuny/HTTP em geral teste a porta 80 ou 443 conforme a URL que voce usa no navegador."
+    Pause-Screen
+}
+
+function Show-MenuDiagnosticoRede {
+    while ($true) {
+        Write-Banner
+        Write-Centered "-- DIAGNOSTICO DE REDE --" 'White'
+        Write-Host ""
+        Write-Host "  Escolha uma ferramenta. Em todas voce informa apenas host/IP (e na opcao 4 tambem a porta)." -ForegroundColor DarkGray
+        Write-Host ""
+        Write-MenuOpt '1' 'Ping'                    'Green'    'ICMP: alcance e latencia (4 tentativas)'
+        Write-MenuOpt '2' 'Tracert / rota'        'Green'    'Saltos ate o destino (ate 30 hops)'
+        Write-MenuOpt '3' 'Consulta DNS'          'Cyan'     'nslookup (Windows) ou host/dig (Linux)'
+        Write-MenuOpt '4' 'Teste de porta TCP'    'Cyan'     'Windows: Test-NetConnection (host + porta)'
+        Write-Host ""
+        Write-MenuOpt '0' 'Voltar'                  'DarkGray' ''
+        Write-Host ""
+        Write-ThinDiv 'DarkGray'
+        Write-Host ""
+        Write-Host "  Opcao: " -ForegroundColor Cyan -NoNewline
+        $ch = (Read-Host).Trim()
+        switch ($ch) {
+            '1' { Show-PingDidatico }
+            '2' { Show-TracertDidatico }
+            '3' { Show-NslookupDidatico }
+            '4' { Show-TestNetConnectionDidatico }
+            '0' { return }
+            default {
+                Write-Warn "Opcao invalida."
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+}
+
 # =============================================================================
 # Menu principal
 # =============================================================================
@@ -2397,8 +2574,7 @@ function Show-MainMenu {
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
         Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login /api/login e envio para /api/relatorio (sem ocorrencia)'
         Write-Host ""
-        Write-MenuOpt '8' 'Teste de ping'         'Green'    'Voce informa so o destino; texto explica o que e latencia'
-        Write-MenuOpt '9' 'Tracert (rota)'        'Green'    'Mostra os saltos ate o destino; leitura didatica do resultado'
+        Write-MenuOpt '8' 'Diagnostico de rede'   'Green'    'Submenu: ping, tracert, DNS e teste de porta TCP (didatico)'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
@@ -2415,8 +2591,7 @@ function Show-MainMenu {
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
             '7' { Invoke-SyncHub $Cfg $ExportScript }
-            '8' { Show-PingDidatico }
-            '9' { Show-TracertDidatico }
+            '8' { Show-MenuDiagnosticoRede }
             '0' {
                 Write-Banner
                 Write-Centered "Ate logo!" 'DarkCyan'
