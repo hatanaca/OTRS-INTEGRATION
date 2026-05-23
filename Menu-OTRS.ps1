@@ -110,8 +110,8 @@ function Load-Config {
         OutputPath      = $PWD.Path
         SearchPath      = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
         HubBaseURL      = 'http://172.16.0.49:3210'
-        SleepArticleMs  = 10
-        SleepTicketMs   = 25
+        SleepArticleMs  = 5
+        SleepTicketMs   = 15
     }
     if (Test-Path $Path) {
         try {
@@ -140,8 +140,8 @@ function Save-Config {
         OutputPath      = $Cfg.OutputPath
         SearchPath      = $Cfg.SearchPath
         HubBaseURL      = $Cfg.HubBaseURL
-        SleepArticleMs  = $(if ($null -ne $Cfg.SleepArticleMs) { [int]$Cfg.SleepArticleMs } else { 10 })
-        SleepTicketMs   = $(if ($null -ne $Cfg.SleepTicketMs)  { [int]$Cfg.SleepTicketMs  } else { 25 })
+        SleepArticleMs  = $(if ($null -ne $Cfg.SleepArticleMs) { [int]$Cfg.SleepArticleMs } else { 5 })
+        SleepTicketMs   = $(if ($null -ne $Cfg.SleepTicketMs)  { [int]$Cfg.SleepTicketMs  } else { 15 })
     } | ConvertTo-Json | Out-File $Path -Encoding UTF8
 }
 
@@ -308,7 +308,8 @@ class OtrsClient {
             } catch {
                 $attempt++
                 if ($attempt -gt $this.RetryMax) { throw }
-                Start-Sleep -Milliseconds (200 * $attempt)
+                $waitMs = [Math]::Min(1200, 50 * [int][Math]::Pow(2, $attempt - 1))
+                Start-Sleep -Milliseconds $waitMs
                 Write-Verbose "Retry $attempt/$($this.RetryMax) para widget CustomerInformation (ticket $ticketID)"
             }
         }
@@ -345,7 +346,8 @@ class OtrsClient {
             } catch {
                 $attempt++
                 if ($attempt -gt $this.RetryMax) { throw }
-                Start-Sleep -Milliseconds (200 * $attempt)
+                $waitMs = [Math]::Min(1200, 50 * [int][Math]::Pow(2, $attempt - 1))
+                Start-Sleep -Milliseconds $waitMs
                 Write-Verbose "Retry $attempt/$($this.RetryMax) para $uri"
             }
         }
@@ -567,8 +569,21 @@ function Get-CustomerUnitFromHtml {
 function Test-AutoNote {
     param([string]$Text)
     if ($Text.Length -lt 5) { return $true }
-    foreach ($pattern in $script:CcoConfig.AutoNotePatterns) {
-        if ($Text -match $pattern) { return $true }
+    if ($null -eq $script:_AutoNoteRxList) {
+        $lst = [System.Collections.Generic.List[System.Text.RegularExpressions.Regex]]::new()
+        $opt = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+            [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+        foreach ($p in $script:CcoConfig.AutoNotePatterns) {
+            try {
+                $lst.Add([System.Text.RegularExpressions.Regex]::new($p, $opt))
+            } catch {
+                Write-Verbose "Pattern AutoNote invalido (ignorado): $p"
+            }
+        }
+        $script:_AutoNoteRxList = $lst
+    }
+    foreach ($rx in $script:_AutoNoteRxList) {
+        if ($rx.IsMatch($Text)) { return $true }
     }
     return $false
 }
@@ -589,7 +604,10 @@ function Get-TicketDataFromHtml {
     else { $estado = 'N/D' }
     if (($m = [regex]::Match($HTML, '(?s)label[^>]*>\s*Criado:\s*</label>\s*<p[^>]+title="([^"]+)"')).Success) { $criado = $m.Groups[1].Value } else { $criado = 'N/D' }
 
-    $token = ''
+    # Cliente/Unidade a partir do HTML principal (sem HTTP extra).
+    $cliente = Get-CustomerNameFromHtml $HTML
+    $unidade = Get-CustomerUnitFromHtml $HTML
+
     $tokenPatterns = @(
         'name="ChallengeToken"\s+value="([A-Za-z0-9]+)"',
         'value="([A-Za-z0-9]+)"\s+name="ChallengeToken"',
@@ -598,40 +616,37 @@ function Get-TicketDataFromHtml {
         'data-challenge-token="([A-Za-z0-9]+)"',
         'ChallengeToken:\s*"([A-Za-z0-9]+)"'
     )
-    foreach ($tp in $tokenPatterns) {
-        if (($m = [regex]::Match($HTML, $tp)).Success) {
-            $token = $m.Groups[1].Value
-            Write-Verbose "ChallengeToken encontrado no HTML principal (ticket $ticketID): $token"
-            break
-        }
-    }
-    if (-not $token) {
-        Write-Verbose "ChallengeToken NAO encontrado no HTML principal do ticket $ticketID"
-    }
 
     $widgetHtml = ''
-    if ($token -and $client) {
-        try {
-            $widgetHtml = $client.GetCustomerWidgetHtml($ticketID, $token)
-            if ($widgetHtml) {
-                Write-Verbose "Widget CustomerInformation obtido: $($widgetHtml.Length) chars (ticket $ticketID)"
-            } else {
-                Write-Verbose "Widget CustomerInformation retornou VAZIO para ticket $ticketID"
+    if (($cliente -eq 'N/D' -or $unidade -eq 'N/D') -and $client) {
+        $token = ''
+        foreach ($tp in $tokenPatterns) {
+            if (($m = [regex]::Match($HTML, $tp)).Success) {
+                $token = $m.Groups[1].Value
+                Write-Verbose "ChallengeToken encontrado (ticket $ticketID): $token"
+                break
             }
-        } catch {
-            Write-Verbose "Widget CustomerInformation indisponivel para ticket $ticketID : $_"
+        }
+        if (-not $token) {
+            Write-Verbose "ChallengeToken NAO encontrado; widget nao buscado (ticket $ticketID)"
+        } else {
+            try {
+                $widgetHtml = $client.GetCustomerWidgetHtml($ticketID, $token)
+                if ($widgetHtml) {
+                    Write-Verbose "Widget CustomerInformation obtido: $($widgetHtml.Length) chars (ticket $ticketID)"
+                    if ($cliente -eq 'N/D') { $cliente = Get-CustomerNameFromHtml $widgetHtml }
+                    if ($unidade -eq 'N/D') { $unidade = Get-CustomerUnitFromHtml $widgetHtml }
+                } else {
+                    Write-Verbose "Widget CustomerInformation retornou VAZIO para ticket $ticketID"
+                }
+            } catch {
+                Write-Verbose "Widget CustomerInformation indisponivel para ticket $ticketID : $_"
+            }
         }
     } else {
-        Write-Verbose "ChallengeToken ausente ou cliente invalido - widget nao buscado (ticket $ticketID)"
+        Write-Verbose "Cliente e unidade ja no HTML principal; pulando widget AJAX (ticket $ticketID)"
     }
 
-    $cliente = 'N/D'
-    $unidade = 'N/D'
-    foreach ($src in @($widgetHtml, $HTML) | Where-Object { $_ }) {
-        if ($cliente -eq 'N/D') { $cliente = Get-CustomerNameFromHtml $src }
-        if ($unidade -eq 'N/D') { $unidade = Get-CustomerUnitFromHtml $src }
-        if ($cliente -ne 'N/D' -and $unidade -ne 'N/D') { break }
-    }
     Write-Verbose "Resultado extracao: Cliente=$cliente, Unidade=$unidade (ticket $ticketID)"
 
     # Ajuste: se unidade == cliente, algo saiu errado - tenta campo alternativo
@@ -782,8 +797,8 @@ function Export-CcoReport {
         [int]$MaxArticles = 9999,
         [int]$FetchLimit = 9999,
         [int]$RetryMax = 3,
-        [int]$SleepArticleMs = 10,
-        [int]$SleepTicketMs = 25,
+        [int]$SleepArticleMs = 5,
+        [int]$SleepTicketMs = 15,
         [switch]$AbrirRelatorio,
         [switch]$DiagMode
     )
@@ -861,9 +876,13 @@ function Export-CcoReport {
     $httpCount = 0
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
+    $progN = 0
     foreach ($tid in $allIds) {
-        Write-Progress -Activity "Processando tickets" -Status "Ticket $tid" -PercentComplete (($httpCount+$cacheHits)/$allIds.Count*100)
+        $progN++
+        if (($progN % 5) -eq 0 -or $progN -eq 1) {
+            $pct = [int]([Math]::Min(100, $progN * 100 / [Math]::Max(1, $allIds.Count)))
+            Write-Progress -Activity "Processando tickets" -Status "Ticket $tid ($progN/$($allIds.Count))" -PercentComplete $pct
+        }
 
         if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds) {
             Write-Verbose "TID $tid - CACHE"
@@ -968,7 +987,7 @@ function Invoke-GerarTxt {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
-    $sa = 10; $st = 25
+    $sa = 5; $st = 15
     if ($null -ne $Cfg.SleepArticleMs) { $sa = [int]$Cfg.SleepArticleMs }
     if ($null -ne $Cfg.SleepTicketMs)  { $st = [int]$Cfg.SleepTicketMs }
     $params = @{
@@ -1014,7 +1033,7 @@ function Invoke-GerarJson {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
-    $sa = 10; $st = 25
+    $sa = 5; $st = 15
     if ($null -ne $Cfg.SleepArticleMs) { $sa = [int]$Cfg.SleepArticleMs }
     if ($null -ne $Cfg.SleepTicketMs)  { $st = [int]$Cfg.SleepTicketMs }
     $params = @{
@@ -1825,6 +1844,7 @@ $script:CcoConfig = @{
         'Status:\s*(OK|PROBLEM|DISASTER)'
     )
 }
+$script:_AutoNoteRxList = $null
 
 # =============================================================================
 # Configuracoes
@@ -1842,8 +1862,8 @@ function Show-Configuracoes {
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
     if (-not $Cfg.HubBaseURL) { $Cfg.HubBaseURL = 'http://172.16.0.49:3210' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
-    if ($null -eq $Cfg.SleepArticleMs) { $Cfg.SleepArticleMs = 10 }
-    if ($null -eq $Cfg.SleepTicketMs)  { $Cfg.SleepTicketMs  = 25 }
+    if ($null -eq $Cfg.SleepArticleMs) { $Cfg.SleepArticleMs = 5 }
+    if ($null -eq $Cfg.SleepTicketMs)  { $Cfg.SleepTicketMs  = 15 }
     $Cfg.SleepArticleMs = [int](Read-Field "Pausa entre notas ao exportar (ms, 0=sem)" $Cfg.SleepArticleMs.ToString())
     $Cfg.SleepTicketMs  = [int](Read-Field "Pausa entre tickets ao exportar (ms, 0=sem)" $Cfg.SleepTicketMs.ToString())
     Write-Host ""

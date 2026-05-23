@@ -16,14 +16,17 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
 | `EstadoFile` | Arquivo JSON de cache (estado dos chamados) |
 | `OutputPath` | Pasta de saída dos relatórios |
 | `HubBaseURL` | URL base do Hub (ex.: `http://172.16.0.49:3210`) para opção de sincronização |
-| `SleepArticleMs` | Pausa entre cada download de nota na exportação (1/2). **0** = sem pausa (mais rápido; pode sobrecarregar o servidor). Padrão: **10** |
-| `SleepTicketMs` | Pausa entre um chamado e outro na exportação. **0** = sem pausa. Padrão: **25** |
+| `SleepArticleMs` | Pausa entre cada download de nota na exportação (opções 1/2). **0** = sem pausa. Padrão: **5** |
+| `SleepTicketMs` | Pausa entre um chamado e outro na exportação. **0** = sem pausa. Padrão: **15** |
 
 ### Desempenho
 
-- **Exportação (opções 1 e 2):** pausas HTTP entre notas e entre chamados são **configuráveis** (`SleepArticleMs` / `SleepTicketMs`, padrão **10** e **25** ms; antes eram 50 e 100 ms fixos). Defina **0** para máxima velocidade se o servidor permitir. A leitura de notas agora respeita `MaxArticles` e `FetchLimit` internamente; no fluxo do menu continuam em **9999** (relatório completo), mas o código deixa de buscar notas além do limite quando esse valor for menor.
-- **Visualizador tempo real (4 notas):** busca só o necessário para montar as quatro notas úteis (ordena por data, para de cedo) e **não** aplica pausa entre notas (`sleepMs 0`).
-- **Sessão OTRS no visualizador:** um único login até sair com `[Q]` (já documentado antes).
+- **Exportação (opções 1 e 2):** pausas configuráveis (`SleepArticleMs` / `SleepTicketMs`, padrão **5** e **15** ms). Use **0** se o OTRS aceitar. `Write-Progress` atualiza com menos frequência para reduzir custo de UI. Requisições HTTP em falha usam backoff exponencial mais curto.
+- **Widget de cliente:** se **nome do cliente** e **unidade** já aparecem no HTML do TicketZoom, o script **não** chama o AJAX `CustomerInformation` (uma requisição a menos por chamado).
+- **Filtro de notas automáticas:** padrões `AutoNotePatterns` são compilados uma vez em memória (menos CPU por nota).
+- **Leitura de notas:** respeita `MaxArticles` / `FetchLimit`; no menu permanecem em **9999** (relatório completo), exceto no visualizador tempo real com limite de 4 notas.
+- **Visualizador tempo real (4 notas):** busca só o necessário (ordena por data, para cedo), sem pausa entre notas.
+- **Sessão OTRS no visualizador:** um único login até sair com `[Q]`.
 
 ## Menu principal
 
