@@ -1422,6 +1422,13 @@ function Show-VisualizadorMenu {
 }
 
 
+# Nome antigo usado em copias do menu; evita erro se o switch ainda chamar Show-Visualizador.
+function Show-Visualizador {
+    param([hashtable]$Cfg, [string]$ExportScript)
+    Show-VisualizadorMenu $Cfg $ExportScript
+}
+
+
 # =============================================================================
 # Integracao com Hub (http://172.16.0.49:3210)
 # =============================================================================
@@ -1751,7 +1758,7 @@ function Show-MainMenu {
         switch ($choice.Trim()) {
             '1' { Invoke-GerarTxt  $Cfg $ExportScript }
             '2' { Invoke-GerarJson $Cfg $ExportScript }
-            '3' { Show-Visualizador $Cfg $ExportScript }
+            '3' { Show-VisualizadorMenu $Cfg $ExportScript }
             '4' { $Cfg = Show-LoginScreen $Cfg }
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
