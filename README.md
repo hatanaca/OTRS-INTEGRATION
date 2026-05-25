@@ -47,3 +47,7 @@ O login usa JSON seguro (`ConvertTo-Json`) para evitar problemas com caracteres 
 1. Acessar `http://...:3210/guest` (ou rota de login) e autenticar.
 2. Abrir `/home` e, se necessário, o relatório CCO na interface.
 3. No Windows, executar o menu e a opção **7** após gerar o cache (opções 1 ou 2) para alinhar o Hub ao último export OTRS.
+
+## Pré-validação da página do relatório CCO (frontend Hub)
+
+Para **não expor o formulário** até existir sessão válida no Hub, pode usar o exemplo em [`hub-relatorio-cco/`](hub-relatorio-cco/README.md): módulo `js/relatorioCcoAuth.js` (`ensureCcoAccess`) e fragmento HTML com `#preAuthGate`. O pedido usa por omissão `GET /api/relatorio` (o mesmo endpoint de leitura já alinhado com este repositório).
