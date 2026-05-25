@@ -347,8 +347,67 @@ class OtrsClient {
     }
 
     hidden [string] GetResponseText($response) {
-        if (-not $response -or -not $response.RawContentStream) { return '' }
-        return [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
+        if (-not $response) { return '' }
+        $bytes = $null
+        if ($response.RawContentStream) {
+            try { $bytes = $response.RawContentStream.ToArray() } catch { $bytes = $null }
+        }
+        if (-not $bytes -or $bytes.Length -eq 0) {
+            if ($null -ne $response.Content) { return [string]$response.Content }
+            return ''
+        }
+        return [OtrsClient]::DecodeResponseBody($bytes, $response)
+    }
+
+    static [string] DecodeResponseBody([byte[]]$Bytes, $Response) {
+        $headerCharset = ''
+        $contentType = ''
+        if ($Response.BaseResponse -and $Response.BaseResponse.ContentType) {
+            $contentType = [string]$Response.BaseResponse.ContentType
+        }
+        elseif ($Response.Headers -and $Response.Headers['Content-Type']) {
+            $contentType = [string]$Response.Headers['Content-Type']
+        }
+        if ($contentType -match 'charset\s*=\s*([^;\s]+)') {
+            $headerCharset = $Matches[1].Trim().Trim('"').Trim("'")
+        }
+
+        $metaCharset = ''
+        if ($Bytes.Length -gt 10) {
+            $probeLen = [Math]::Min($Bytes.Length, 16384)
+            $probeEnc = [System.Text.Encoding]::ASCII
+            try {
+                $head = $probeEnc.GetString($Bytes, 0, $probeLen)
+                if ($head -match '(?i)charset\s*=\s*["'']?([^"''\s>]+)') { $metaCharset = $Matches[1].Trim() }
+            } catch { }
+        }
+
+        $candidates = @($headerCharset, $metaCharset) | Where-Object { $_ }
+        foreach ($name in $candidates) {
+            try {
+                $enc = [System.Text.Encoding]::GetEncoding($name)
+                return $enc.GetString($Bytes)
+            } catch { }
+        }
+
+        # UTF-8 BOM
+        if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+            return [System.Text.Encoding]::UTF8.GetString($Bytes, 3, $Bytes.Length - 3)
+        }
+
+        $utf8 = [System.Text.Encoding]::UTF8
+        $utf8Lenient = New-Object System.Text.UTF8Encoding $false, $false
+        $asUtf8 = $utf8Lenient.GetString($Bytes)
+        if ($asUtf8.IndexOf([char]0xFFFD) -lt 0) {
+            return $asUtf8
+        }
+
+        foreach ($encName in @('windows-1252', 'iso-8859-1')) {
+            try {
+                return [System.Text.Encoding]::GetEncoding($encName).GetString($Bytes)
+            } catch { }
+        }
+        return $utf8.GetString($Bytes)
     }
 }
 
@@ -689,6 +748,51 @@ function Get-TicketDataFromHtml {
 # =============================================================================
 # Formatacao e funcao principal
 # =============================================================================
+function Copy-TicketWithArticleLimit {
+    param(
+        [TicketData]$Ticket,
+        [int]$MaxNotes
+    )
+    if ($null -eq $Ticket) { return $null }
+    if ($MaxNotes -le 0) { return $Ticket }
+    $arts = @($Ticket.Articles)
+    if ($arts.Count -le $MaxNotes) { return $Ticket }
+    $short = [System.Collections.Generic.List[object]]::new()
+    $start = $arts.Count - $MaxNotes
+    for ($i = $start; $i -lt $arts.Count; $i++) {
+        $short.Add($arts[$i])
+    }
+    return [TicketData]::new($Ticket.Numero, $Ticket.Estado, $Ticket.Criado, $Ticket.Cliente, $Ticket.Unidade, $short)
+}
+
+function Copy-TicketsWithArticleLimit {
+    param(
+        $Tickets,
+        [int]$MaxNotes
+    )
+    if ($MaxNotes -le 0) { return $Tickets }
+    $out = [System.Collections.Generic.List[TicketData]]::new()
+    foreach ($t in $Tickets) {
+        $out.Add((Copy-TicketWithArticleLimit $t $MaxNotes))
+    }
+    return @($out)
+}
+
+function Read-NotasExportOption {
+    Write-Host ""
+    Write-Host "  Notas por chamado no arquivo de saida:" -ForegroundColor Yellow
+    Write-Host "  [1] Todas as notas"
+    Write-Host "  [2] Apenas as 5 mais recentes"
+    Write-Host "  Opcao [1]: " -ForegroundColor Cyan -NoNewline
+    $o = (Read-Host).Trim()
+    if ($o -eq '2') {
+        Write-Info "Exportacao com as 5 notas mais recentes por chamado (o cache JSON interno permanece com todas as notas)."
+        return 5
+    }
+    Write-Info "Exportacao com todas as notas obtidas de cada chamado."
+    return 0
+}
+
 function ConvertTo-TicketBlock {
     param([TicketData]$Ticket)
     $c = $script:CcoConfig
@@ -746,6 +850,7 @@ function Export-CcoReport {
         [int]$RetryMax = 3,
         [int]$SleepArticleMs = 50,
         [int]$SleepTicketMs = 100,
+        [int]$MaxNotesExport = 0,
         [switch]$AbrirRelatorio,
         [switch]$DiagMode
     )
@@ -761,6 +866,7 @@ function Export-CcoReport {
     Write-Verbose "BaseURL: $BaseURL"
     Write-Verbose "Perfil: $SearchPath"
     Write-Verbose "Cache: $EstadoFile"
+    Write-Verbose "MaxNotesExport (TXT): $(if ($MaxNotesExport -gt 0) { $MaxNotesExport } else { 'todas' })"
 
     $client = [OtrsClient]::new($BaseURL, $RetryMax)
     $client.Login($Username, $Password)
@@ -863,8 +969,10 @@ function Export-CcoReport {
     $cache.Save()
 
     if ($PSCmdlet.ShouldProcess("Gerar relatorios", "Criar arquivos CCO e Resolvidos")) {
-        $ativoContent     = New-CcoFileContent -Tickets $ativos    -Titulo $script:CcoConfig.TituloRelatorio -EmptyMessage "Nenhum chamado critico ativo no momento."
-        $resolvidoContent = New-CcoFileContent -Tickets $resolvidos -Titulo $script:CcoConfig.TituloResolvidos -EmptyMessage "Nenhum chamado normalizado."
+        $ativosParaTxt    = Copy-TicketsWithArticleLimit $ativos    $MaxNotesExport
+        $resolvParaTxt    = Copy-TicketsWithArticleLimit $resolvidos $MaxNotesExport
+        $ativoContent     = New-CcoFileContent -Tickets $ativosParaTxt -Titulo $script:CcoConfig.TituloRelatorio -EmptyMessage "Nenhum chamado critico ativo no momento."
+        $resolvidoContent = New-CcoFileContent -Tickets $resolvParaTxt -Titulo $script:CcoConfig.TituloResolvidos -EmptyMessage "Nenhum chamado normalizado."
 
         $ativoContent | Out-File $ativoPath -Encoding UTF8
         if ($resolvidos.Count -gt 0) {
@@ -925,20 +1033,22 @@ function Invoke-GerarTxt {
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
+    $maxNotesExport = Read-NotasExportOption
     try {
         Ensure-ExportScript $ExportScript
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
     $params = @{
-        BaseURL        = $Cfg.BaseURL
-        Username       = $Cfg.Username
-        Password       = $Cfg.Password
-        SearchPath     = $Cfg.SearchPath
-        EstadoFile     = $Cfg.EstadoFile
-        OutputDir      = $Cfg.OutputPath
-        AbrirRelatorio = $false
-        DiagMode       = $false
+        BaseURL         = $Cfg.BaseURL
+        Username        = $Cfg.Username
+        Password        = $Cfg.Password
+        SearchPath      = $Cfg.SearchPath
+        EstadoFile      = $Cfg.EstadoFile
+        OutputDir       = $Cfg.OutputPath
+        AbrirRelatorio  = $false
+        DiagMode        = $false
+        MaxNotesExport  = $maxNotesExport
     }
     try {
         Export-CcoReport @params
@@ -966,20 +1076,22 @@ function Invoke-GerarJson {
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
+    $maxNotesExport = Read-NotasExportOption
     try {
         Ensure-ExportScript $ExportScript
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
     $params = @{
-        BaseURL        = $Cfg.BaseURL
-        Username       = $Cfg.Username
-        Password       = $Cfg.Password
-        SearchPath     = $Cfg.SearchPath
-        EstadoFile     = $Cfg.EstadoFile
-        OutputDir      = $Cfg.OutputPath
-        AbrirRelatorio = $false
-        DiagMode       = $false
+        BaseURL         = $Cfg.BaseURL
+        Username        = $Cfg.Username
+        Password        = $Cfg.Password
+        SearchPath      = $Cfg.SearchPath
+        EstadoFile      = $Cfg.EstadoFile
+        OutputDir       = $Cfg.OutputPath
+        AbrirRelatorio  = $false
+        DiagMode        = $false
+        MaxNotesExport  = $maxNotesExport
     }
     try {
         Export-CcoReport @params
@@ -1021,6 +1133,14 @@ function Invoke-GerarJson {
             foreach ($n in $t.Notas) {
                 $notaList.Add([ordered]@{ Data = $n.Date; Texto = $n.Text })
             }
+            if ($maxNotesExport -gt 0 -and $notaList.Count -gt $maxNotesExport) {
+                $from = $notaList.Count - $maxNotesExport
+                $trimmed = [System.Collections.Generic.List[object]]::new()
+                for ($i = $from; $i -lt $notaList.Count; $i++) {
+                    $trimmed.Add($notaList[$i])
+                }
+                $notaList = $trimmed
+            }
             $obj.Notas = $notaList
         }
         if ($t.Estado -and ($t.Estado.ToLower().Trim() -in $estadosResolvidos)) {
@@ -1031,11 +1151,12 @@ function Invoke-GerarJson {
     }
 
     $report = [ordered]@{
-        Gerado      = $now.ToString('dd/MM/yyyy HH:mm:ss')
-        TotalAtivos = $ativos.Count
-        TotalResolvidos = $resolvidos.Count
-        Ativos      = $ativos
-        Resolvidos  = $resolvidos
+        Gerado            = $now.ToString('dd/MM/yyyy HH:mm:ss')
+        NotasPorChamado   = if ($maxNotesExport -gt 0) { "ultimas_$maxNotesExport" } else { "todas" }
+        TotalAtivos       = $ativos.Count
+        TotalResolvidos   = $resolvidos.Count
+        Ativos            = $ativos
+        Resolvidos        = $resolvidos
     }
     $report | ConvertTo-Json -Depth 8 | Out-File $jsonPath -Encoding UTF8
 
@@ -1791,8 +1912,8 @@ function Show-MainMenu {
         Write-Centered "-- MENU PRINCIPAL --" 'White'
         Write-Host ""
 
-        Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'Cria arquivo .txt no formato CCO'
-        Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Cria arquivo .json com todos os dados'
+        Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'Pergunta: todas as notas ou 5 mais recentes; formato CCO'
+        Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Atualiza cache, pergunta notas (todas ou 5) e gera .json'
         Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
