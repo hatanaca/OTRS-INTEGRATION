@@ -19,8 +19,8 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
 
 ## Menu principal
 
-1. **Gerar relatório TXT** — Formato WhatsApp/CCO.
-2. **Gerar relatório JSON** — Cache completo para outras ferramentas.
+1. **Gerar relatório TXT** — Formato WhatsApp/CCO; na mesma execução grava também o arquivo `Relatorio_CCO_*.json` (resumo ativos/resolvidos) com base no cache atualizado.
+2. **Gerar relatório JSON** — Executa o mesmo export do OTRS (TXT + cache) e grava o `Relatorio_CCO_*.json`; ou seja, TXT e JSON de resumo ficam alinhados numa única atualização.
 3. **Visualizar chamados** — Submenu:
    - **OTRS tempo real (4 notas)** — Atualização a cada 60 s; apenas as **quatro notas mais recentes** por chamado (consulta direta ao OTRS).
    - **OTRS tempo real (todas)** — Mesmo fluxo em tempo real, porém com **todas as notas** de cada chamado ativo (mais lento).
