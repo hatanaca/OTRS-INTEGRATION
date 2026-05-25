@@ -1,0 +1,53 @@
+<!--
+  Integração: coloque o conteúdo abaixo na rota do relatório CCO.
+  1. Ajuste os atributos data-* no <body> se as rotas do Hub forem diferentes.
+  2. O painel #preAuthGate deve aparecer antes de #appContainer no DOM.
+  3. No início do relatorioCco.js (módulo): import { ensureCcoAccess } from "/js/relatorioCcoAuth.js"; await ensureCcoAccess();
+-->
+
+<!-- Exemplo de abertura do body (combine com as classes Tailwind existentes): -->
+<body
+  class="p-4 sm:p-6 lg:p-8"
+  data-auth-check-url="/api/relatorio"
+  data-login-url="/guest"
+  data-home-url="/home"
+>
+  <div
+    id="preAuthGate"
+    class="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-900/95 p-4 text-center backdrop-blur-sm"
+  >
+    <div
+      class="max-w-lg rounded-xl border border-slate-600 bg-slate-800 p-8 text-white shadow-2xl"
+    >
+      <p
+        id="preAuthMessage"
+        class="mb-6 text-base leading-relaxed text-slate-100"
+      >
+        Verificando permissão para o relatório CCO…
+      </p>
+      <div
+        class="flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:flex-wrap"
+      >
+        <a
+          id="preAuthLoginLink"
+          class="hidden rounded-lg bg-indigo-600 px-4 py-2 text-center text-sm font-semibold text-white no-underline transition hover:bg-indigo-500"
+          href="/guest"
+          >Iniciar sessão</a>
+        <a
+          id="preAuthHomeLink"
+          class="hidden inline-flex items-center justify-center gap-2 rounded-md bg-slate-600 px-4 py-2 text-sm font-medium text-white no-underline transition hover:bg-slate-500"
+          href="/home"
+          >Início</a>
+        <button
+          id="preAuthRetry"
+          type="button"
+          class="hidden rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-500"
+        >
+          Tentar novamente
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- O restante da página: #appContainer.hidden, header, formulários, etc. -->
+</body>
