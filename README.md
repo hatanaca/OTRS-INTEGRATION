@@ -20,7 +20,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `EstadoFile` | Arquivo JSON de cache (estado dos chamados) |
 | `OutputPath` | Pasta de saída dos relatórios |
 | `HubBaseURL` | URL base do Hub (ex.: `http://172.16.0.49:3210`) para opção de sincronização |
-| `HubEncaminharPath` | Rota web relativa após cada envio bem-sucedido (padrão `home`), usada ao abrir o navegador para encaminhar o relatório na interface |
+| `HubEncaminharPath` | Rota aberta no navegador após envio (padrão `api/relatorio` = página **Gerador de Relatório CCO**). Use `home` se preferir o painel inicial. |
 | `HubEmail` | E-mail do login JSON do Hub (`POST /api/login`) — opcional; se preenchido, a opção 7 usa como padrão |
 | `HubPassword` | Senha do Hub para a mesma API — **texto claro**; opcional com Enter na sincronização para reutilizar a gravada |
 | `HubApiRelatorioPath` | Caminho relativo à URL base para listar/criar relatórios (padrão `api/relatorio`). Se o servidor responder `Cannot POST /api/relatorio`, ajuste para o caminho real (ex.: `api/relatorios`), conforme o Hub expõe na rede (DevTools → Network). |
@@ -38,7 +38,7 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
-7. **Sincronizar com Hub** — Login em `/api/login` (JSON); leitura e envio usam o caminho configurável `HubApiRelatorioPath` (padrão `api/relatorio`, ou seja, `GET`/`POST` em `/api/relatorio` e `PUT` em `/api/relatorio/{numero}`). Fluxo: resumo, ocorrência opcional, HTML de revisão, confirmação e `POST`/`PUT`. Após sucesso, opção de abrir o Hub (`HubEncaminharPath`). Se `HubEmail` / `HubPassword` existirem em `config.json`, o login na opção 7 pode ser só *Enter* na senha.
+7. **Sincronizar com Hub** — Login em `/api/login`; `GET`/`POST` em `/api/relatorio` (configurável via `HubApiRelatorioPath`). O script envia os dados dos tickets; a **página** `…/api/relatorio` no navegador é o *Gerador CCO* (campos, gravação incremental). **Gerar relatório**, **WhatsApp** e **E-mail** são ações na própria interface, não feitas pelo Menu-OTRS. Após o `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`, por defeito `api/relatorio`).
 
 ### Normalização (avisos ao operador)
 
@@ -46,9 +46,11 @@ Nos modos em tempo real e ao recarregar o cache (`R` no visualizador offline), s
 
 ## Integração Hub / relatório CCO
 
-O payload enviado contém: número do ticket, status, data/hora de abertura, cliente e lista de atualizações (texto/data). O campo **Ocorrência** pode ser informado no terminal durante a sincronização; se preenchido, é incluído no JSON como `ocorrencia` (o Hub precisa aceitar esse campo na API; caso contrário, deixe em branco).
+O payload inclui `number`, `status`, `openingDate`, `openingHour`, `client`, `updates` e, se informado no terminal, **`ocorrencia`** e **`occurrence`** (este último alinha ao campo `data-field="occurrence"` do formulário HTML do Hub).
 
 Antes do envio, o script gera um arquivo HTML temporário com o mesmo conteúdo e abre o navegador para **validação visual** pelo operador; o envio só ocorre após confirmação no terminal.
+
+A página **`/api/relatorio`** do Hub é o gerador integrado: os tickets são **guardados** à medida que edita; não há um passo separado de “encaminhar” só pela API — o relatório final e envios (WhatsApp/e-mail) usam os botões da interface.
 
 ### Erros comuns
 
@@ -61,6 +63,6 @@ O login usa JSON seguro (`ConvertTo-Json`) para evitar problemas com caracteres 
 
 ## Fluxo sugerido no Hub
 
-1. Acessar `http://...:3210/guest` (ou rota de login) e autenticar.
-2. Ajustar em **Configurações** o campo `HubEncaminharPath` se a rota de encaminhamento no Hub não for `home`.
-3. No Windows, executar o menu e a opção **7** após gerar o cache (opções 1 ou 2): revisar o HTML, confirmar o envio e, se desejar, abrir o Hub para concluir o encaminhamento na UI.
+1. Autenticar no Hub (`/guest` ou rota de login da sua instalação).
+2. A página **`/api/relatorio`** (Gerador de Relatório CCO) sincroniza com a API: o Menu-OTRS (opção 7) envia/atualiza tickets; no browser os campos são preenchidos e **gravados** conforme o fluxo do `relatorioCco.js`.
+3. Use **Gerar Relatório**, **Copiar**, **WhatsApp** ou **E-mail** na própria página quando quiser concluir o envio ao CCO/cliente.

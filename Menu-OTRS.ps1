@@ -18,9 +18,10 @@ $script:ExportLoaded = $false
 # -----------------------------------------------------------------------------
 # Hub: padroes se config.json nao definir HubEmail / HubPassword.
 # Edite abaixo; valores em config.json (menu 5) prevalecem quando a chave existir.
+# ATENCAO: senha em texto claro. Nao publique este arquivo em repositorio publico.
 # -----------------------------------------------------------------------------
-$script:MenuOtrsHubDefaultEmail    = 'thiago.ratanaka@microset.net.br'
-$script:MenuOtrsHubDefaultPassword = ''
+$script:MenuOtrsHubDefaultEmail     = 'thiago.ratanaka@microset.net.br'
+$script:MenuOtrsHubDefaultPassword  = 'SenhaN2M7@'
 
 # =============================================================================
 # Helpers de UI
@@ -117,7 +118,7 @@ function Load-Config {
         OutputPath         = $PWD.Path
         SearchPath         = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
         HubBaseURL           = 'http://172.16.0.49:3210'
-        HubEncaminharPath    = 'home'
+        HubEncaminharPath    = 'api/relatorio'
         HubEmail             = ([string]$script:MenuOtrsHubDefaultEmail).Trim()
         HubPassword          = [string]$script:MenuOtrsHubDefaultPassword
         HubApiRelatorioPath  = 'api/relatorio'
@@ -1766,13 +1767,19 @@ function Build-HubTicket {
         updates     = @($updates)
     }
     $occTrim = ($Ocorrencia -as [string]).Trim()
-    if ($occTrim.Length -gt 0) { $h.ocorrencia = $occTrim }
+    if ($occTrim.Length -gt 0) {
+        $h.ocorrencia  = $occTrim
+        $h.occurrence  = $occTrim
+    }
     return $h
 }
 
 function Test-HubRelatorioChanged {
     param($hubTicket, $payload)
     if (-not $hubTicket) { return $true }
+    if ($payload.Keys -contains 'occurrence') {
+        if (($hubTicket.occurrence -or '') -ne ($payload.occurrence -or '')) { return $true }
+    }
     if ($payload.Keys -contains 'ocorrencia') {
         if (($hubTicket.ocorrencia -or '') -ne ($payload.ocorrencia -or '')) { return $true }
     }
@@ -1803,8 +1810,8 @@ function Show-HubTicketPreview {
     Write-Host ($Payload.openingDate + " " + $Payload.openingHour) -ForegroundColor White
     Write-Host "  Atualizac: " -ForegroundColor DarkGray -NoNewline
     Write-Host ($Payload.updates.Count.ToString() + " notas") -ForegroundColor White
-    if ($Payload.ocorrencia) {
-        $oc = [string]$Payload.ocorrencia
+    if ($Payload.ocorrencia -or $Payload.occurrence) {
+        $oc = if ($Payload.ocorrencia) { [string]$Payload.ocorrencia } else { [string]$Payload.occurrence }
         if ($oc.Length -gt 160) { $oc = $oc.Substring(0, 157) + "..." }
         Write-Host "  Ocorren. : " -ForegroundColor DarkGray -NoNewline
         Write-Host $oc -ForegroundColor White
@@ -1828,8 +1835,8 @@ function Read-OcorrenciaMultiline {
 
 function Get-HubEncaminharUri {
     param([string]$HubUrl, [string]$RelativePath)
-    $p = if ($RelativePath) { $RelativePath.Trim().TrimStart('/') } else { 'home' }
-    if (-not $p) { $p = 'home' }
+    $p = if ($RelativePath) { $RelativePath.Trim().TrimStart('/') } else { 'api/relatorio' }
+    if (-not $p) { $p = 'api/relatorio' }
     return ($HubUrl.TrimEnd('/') + '/' + $p)
 }
 
@@ -1860,8 +1867,9 @@ function Export-HubRelatorioFormHtml {
         [void]$sbRows.Append($uh).Append('</td><td class="note">').Append($ut).Append('</td></tr>')
     }
 
-    if ($Payload.ocorrencia) {
-        $occBody = (HtmlEsc ([string]$Payload.ocorrencia)) -replace "`r`n", '<br/>' -replace "`n", '<br/>'
+    if ($Payload.ocorrencia -or $Payload.occurrence) {
+        $occRaw = if ($Payload.ocorrencia) { [string]$Payload.ocorrencia } else { [string]$Payload.occurrence }
+        $occBody = (HtmlEsc $occRaw) -replace "`r`n", '<br/>' -replace "`n", '<br/>'
     } else {
         $occBody = '<span class="muted">(vazio neste envio)</span>'
     }
@@ -1929,7 +1937,7 @@ function Show-HubRelatorioFormHtml {
 
 function Invoke-HubPerguntaAbrirEncaminhar {
     param([string]$HubUrl, [string]$EncaminharPath)
-    Write-Host "  Abrir Hub no navegador para encaminhar o relatorio? [S/n]: " -ForegroundColor Yellow -NoNewline
+    Write-Host "  Abrir Hub no navegador (pagina Gerador CCO / encaminhar)? [S/n]: " -ForegroundColor Yellow -NoNewline
     $r2 = Read-Host
     if ($r2 -eq '' -or $r2 -match '^[Ss]') {
         try {
@@ -1948,7 +1956,8 @@ function Invoke-SyncHub {
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
     Write-Info "Fluxo: resumo no terminal, Ocorrencia opcional, formulario HTML no navegador, confirmacao e envio (API)."
-    Write-Info "Apos cada envio bem-sucedido, podera abrir o Hub para o passo de encaminhamento na interface web."
+    Write-Info "A pagina Hub /api/relatorio (Gerador CCO) preenche e grava tickets; WhatsApp/Email sao na propria UI apos Gerar Relatorio."
+    Write-Info "Apos cada envio API bem-sucedido, podera abrir o Hub na rota configurada (padrao api/relatorio)."
     Write-Host ""
 
     # Credenciais do Hub (opcional: HubEmail / HubPassword em config.json)
@@ -1978,7 +1987,7 @@ function Invoke-SyncHub {
     $hubUrl = $hubUrl.TrimEnd('/')
     $encPathRel = if ($Cfg.HubEncaminharPath -and $Cfg.HubEncaminharPath.ToString().Trim()) {
         $Cfg.HubEncaminharPath.ToString().Trim()
-    } else { 'home' }
+    } else { 'api/relatorio' }
     $apiRelRoot = Get-HubRelatorioPathPrefix $Cfg
     Write-Host ""
     Write-Info ("API relatorio (GET/POST): " + $hubUrl + $apiRelRoot)
@@ -2169,10 +2178,10 @@ function Show-Configuracoes {
     $Cfg.SearchPath = Read-Field "Perfil de busca (SearchPath)" $Cfg.SearchPath
     $Cfg.EstadoFile = Read-Field "Arquivo de cache (JSON)"      $Cfg.EstadoFile
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
-    if (-not $Cfg.HubEncaminharPath) { $Cfg.HubEncaminharPath = 'home' }
+    if (-not $Cfg.HubEncaminharPath) { $Cfg.HubEncaminharPath = 'api/relatorio' }
     if (-not $Cfg.HubApiRelatorioPath) { $Cfg.HubApiRelatorioPath = 'api/relatorio' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
-    $Cfg.HubEncaminharPath = Read-Field "Hub: rota web apos envio (encaminhar ex.: home ou relatorio)" $Cfg.HubEncaminharPath
+    $Cfg.HubEncaminharPath = Read-Field "Hub: rota apos envio (ex.: api/relatorio = Gerador CCO, ou home)" $Cfg.HubEncaminharPath
     $Cfg.HubApiRelatorioPath = Read-Field "Hub: caminho API relatorio (GET/POST; ex.: api/relatorio ou api/relatorios)" $Cfg.HubApiRelatorioPath
     $Cfg.HubEmail = Read-Field "Hub: email (login API /api/login)" ([string]$Cfg.HubEmail)
     $hpHint = if ($Cfg.HubPassword -and $Cfg.HubPassword.ToString().Length -gt 0) { "[senha gravada; Enter mantem]" } else { "[sem senha salva]" }

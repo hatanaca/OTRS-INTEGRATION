@@ -6,7 +6,7 @@
   "OutputPath": ".",
   "SearchPath": "index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8",
   "HubBaseURL": "http://172.16.0.49:3210",
-  "HubEncaminharPath": "home",
+  "HubEncaminharPath": "api/relatorio",
   "HubEmail": "thiago.ratanaka@microset.net.br",
   "HubPassword": "",
   "HubApiRelatorioPath": "api/relatorio"
