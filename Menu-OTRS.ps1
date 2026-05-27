@@ -914,6 +914,67 @@ function Show-LoginScreen {
 }
 
 # =============================================================================
+# JSON resumo do relatorio (Ativos / Resolvidos) a partir do cache EstadoFile
+# =============================================================================
+function Export-RelatorioCcoJsonFile {
+    param([hashtable]$Cfg)
+
+    $cachePath = $Cfg.EstadoFile
+    if (-not [System.IO.Path]::IsPathRooted($cachePath)) {
+        $cachePath = Join-Path $Cfg.OutputPath $cachePath
+    }
+    if (-not (Test-Path $cachePath)) { return $null }
+
+    $now      = Get-Date
+    $jsonName = "Relatorio_CCO_" + $now.ToString('yyyy-MM-dd_HH-mm') + ".json"
+    $jsonPath = Join-Path $Cfg.OutputPath $jsonName
+
+    $rawCache = Get-Content $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $ativos     = [System.Collections.Generic.List[object]]::new()
+    $resolvidos = [System.Collections.Generic.List[object]]::new()
+    $estadosResolvidos = $script:CcoConfig.EstadosResolvidos
+
+    foreach ($prop in $rawCache.PSObject.Properties) {
+        $t = $prop.Value
+        $obj = [ordered]@{
+            ID      = $prop.Name
+            Numero  = $t.Numero
+            Estado  = $t.Estado
+            Criado  = $t.Criado
+            Cliente = $t.Cliente
+            Unidade = $t.Unidade
+            Notas   = @()
+        }
+        if ($t.Notas) {
+            $notaList = [System.Collections.Generic.List[object]]::new()
+            foreach ($n in $t.Notas) {
+                $notaList.Add([ordered]@{ Data = $n.Date; Texto = $n.Text })
+            }
+            $obj.Notas = $notaList
+        }
+        if ($t.Estado -and ($t.Estado.ToLower().Trim() -in $estadosResolvidos)) {
+            $resolvidos.Add($obj)
+        } else {
+            $ativos.Add($obj)
+        }
+    }
+
+    $report = [ordered]@{
+        Gerado            = $now.ToString('dd/MM/yyyy HH:mm:ss')
+        TotalAtivos       = $ativos.Count
+        TotalResolvidos   = $resolvidos.Count
+        Ativos            = $ativos
+        Resolvidos        = $resolvidos
+    }
+    $report | ConvertTo-Json -Depth 8 | Out-File $jsonPath -Encoding UTF8
+    return [pscustomobject]@{
+        Path              = $jsonPath
+        TotalAtivos       = $ativos.Count
+        TotalResolvidos   = $resolvidos.Count
+    }
+}
+
+# =============================================================================
 # Gerar TXT
 # =============================================================================
 
@@ -947,6 +1008,14 @@ function Invoke-GerarTxt {
         Export-CcoReport @params
         Write-Host ""
         Write-OK "Relatorio TXT gerado com sucesso."
+        $jsonMeta = Export-RelatorioCcoJsonFile $Cfg
+        if ($jsonMeta) {
+            Write-OK ("Resumo JSON salvo em: " + $jsonMeta.Path)
+            Write-Info ("Ativos: " + $jsonMeta.TotalAtivos + "   Resolvidos: " + $jsonMeta.TotalResolvidos)
+            Write-Info "Atualizacao TXT e JSON de resumo concluida na mesma execucao."
+        } else {
+            Write-Warn "Cache nao encontrado apos export; JSON de resumo nao foi gerado."
+        }
     } catch {
         Write-Host ""
         Write-Err ("Erro: " + $_)
@@ -990,61 +1059,15 @@ function Invoke-GerarJson {
         Write-Err ("Erro na exportacao: " + $_); Pause-Screen; return
     }
 
-    $cachePath = $Cfg.EstadoFile
-    if (-not [System.IO.Path]::IsPathRooted($cachePath)) {
-        $cachePath = Join-Path $Cfg.OutputPath $cachePath
-    }
-    if (-not (Test-Path $cachePath)) {
-        Write-Warn "Cache nao encontrado, nenhum JSON exportado."
+    $jsonMeta = Export-RelatorioCcoJsonFile $Cfg
+    if (-not $jsonMeta) {
+        Write-Warn "Cache nao encontrado, nenhum JSON de resumo exportado."
         Pause-Screen; return
     }
 
-    $now      = Get-Date
-    $jsonName = "Relatorio_CCO_" + $now.ToString('yyyy-MM-dd_HH-mm') + ".json"
-    $jsonPath = Join-Path $Cfg.OutputPath $jsonName
-
-    $rawCache = Get-Content $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $ativos     = [System.Collections.Generic.List[object]]::new()
-    $resolvidos = [System.Collections.Generic.List[object]]::new()
-    $estadosResolvidos = @('resolvido','fechado','removido','encerrado','resolved','closed','merged','agrupado')
-
-    foreach ($prop in $rawCache.PSObject.Properties) {
-        $t = $prop.Value
-        $obj = [ordered]@{
-            ID      = $prop.Name
-            Numero  = $t.Numero
-            Estado  = $t.Estado
-            Criado  = $t.Criado
-            Cliente = $t.Cliente
-            Unidade = $t.Unidade
-            Notas   = @()
-        }
-        if ($t.Notas) {
-            $notaList = [System.Collections.Generic.List[object]]::new()
-            foreach ($n in $t.Notas) {
-                $notaList.Add([ordered]@{ Data = $n.Date; Texto = $n.Text })
-            }
-            $obj.Notas = $notaList
-        }
-        if ($t.Estado -and ($t.Estado.ToLower().Trim() -in $estadosResolvidos)) {
-            $resolvidos.Add($obj)
-        } else {
-            $ativos.Add($obj)
-        }
-    }
-
-    $report = [ordered]@{
-        Gerado      = $now.ToString('dd/MM/yyyy HH:mm:ss')
-        TotalAtivos = $ativos.Count
-        TotalResolvidos = $resolvidos.Count
-        Ativos      = $ativos
-        Resolvidos  = $resolvidos
-    }
-    $report | ConvertTo-Json -Depth 8 | Out-File $jsonPath -Encoding UTF8
-
     Write-Host ""
-    Write-OK ("JSON salvo em: " + $jsonPath)
-    Write-Info ("Ativos: " + $ativos.Count + "   Resolvidos: " + $resolvidos.Count)
+    Write-OK ("JSON salvo em: " + $jsonMeta.Path)
+    Write-Info ("TXT do CCO atualizado na mesma execucao. Ativos: " + $jsonMeta.TotalAtivos + "   Resolvidos: " + $jsonMeta.TotalResolvidos)
     Pause-Screen
 }
 
@@ -1964,8 +1987,8 @@ function Show-MainMenu {
         Write-Centered "-- MENU PRINCIPAL --" 'White'
         Write-Host ""
 
-        Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'Cria arquivo .txt no formato CCO'
-        Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Cria arquivo .json com todos os dados'
+        Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'TXT CCO + Relatorio_CCO_*.json na mesma execucao'
+        Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Mesmo export: TXT, cache e Relatorio_CCO_*.json juntos'
         Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
