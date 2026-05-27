@@ -131,6 +131,7 @@ function Load-Config {
         HubWebDriverDebugAddress = ''
         HubWebDriverBrowser  = 'Chrome'
         HubSeleniumModulePath = ''
+        FilterCustomerVisibleNotesOnly = $true
     }
     if (Test-Path $Path) {
         try {
@@ -179,6 +180,12 @@ function Load-Config {
             if ($propNames -contains 'HubSeleniumModulePath') {
                 $cfg.HubSeleniumModulePath = [string]$j.HubSeleniumModulePath
             }
+            if ($propNames -contains 'FilterCustomerVisibleNotesOnly') {
+                $vf = $j.FilterCustomerVisibleNotesOnly
+                if ($vf -is [bool]) { $cfg.FilterCustomerVisibleNotesOnly = $vf }
+                elseif ($vf -is [string]) { $cfg.FilterCustomerVisibleNotesOnly = $vf.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
+                else { $cfg.FilterCustomerVisibleNotesOnly = [bool]$vf }
+            }
         } catch { }
     }
     return $cfg
@@ -207,6 +214,7 @@ function Save-Config {
         HubWebDriverDebugAddress = $Cfg.HubWebDriverDebugAddress
         HubWebDriverBrowser = $Cfg.HubWebDriverBrowser
         HubSeleniumModulePath = $Cfg.HubSeleniumModulePath
+        FilterCustomerVisibleNotesOnly = $Cfg.FilterCustomerVisibleNotesOnly
     } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
 }
 
@@ -697,6 +705,19 @@ function Test-AutoNote {
     return $false
 }
 
+function Test-ArticleRowVisibleForCustomer {
+    param([string]$RowTagAttributes)
+    if (-not $RowTagAttributes) { return $false }
+    return ($RowTagAttributes -match '\bVisibleForCustomer\b')
+}
+
+function Sync-CcoConfigFromCfg {
+    param([hashtable]$Cfg)
+    if ($null -ne $Cfg.FilterCustomerVisibleNotesOnly) {
+        $script:CcoConfig.FilterCustomerVisibleNotesOnly = [bool]$Cfg.FilterCustomerVisibleNotesOnly
+    }
+}
+
 function Get-TicketDataFromHtml {
     param(
         [string]$HTML,
@@ -781,16 +802,22 @@ function Get-TicketDataFromHtml {
     }
 
     $articles = [System.Collections.Generic.List[object]]::new()
+    $filterVisibleOnly = $script:CcoConfig.FilterCustomerVisibleNotesOnly
     $rowPattern = @'
-(?s)<tr[^>]*id="Row\d+"[^>]*>(.*?)</tr>
+(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>
 '@
     $rowMatches = [regex]::Matches($HTML, $rowPattern)
 
     foreach ($row in $rowMatches) {
-        $rowHtml = $row.Groups[1].Value
+        $rowTag = $row.Groups[1].Value
+        $rowHtml = $row.Groups[2].Value
         if (($m = [regex]::Match($rowHtml, '<input[^>]+class="ArticleID"[^>]+value="(\d+)"')).Success) { $aid = $m.Groups[1].Value } else { $aid = $null }
         if (($m = [regex]::Match($rowHtml, '<td class="Created">[^<]*<div title="([^"]+)"')).Success) { $adate = $m.Groups[1].Value } else { $adate = 'N/D' }
         if (-not $aid) { continue }
+        if ($filterVisibleOnly -and -not (Test-ArticleRowVisibleForCustomer $rowTag)) {
+            Write-Verbose "Artigo $aid ignorado (nao marcado como visivel ao cliente) ticket $ticketID"
+            continue
+        }
         try {
             $raw = $client.GetArticleContent($ticketID, $aid)
             $raw = $raw -replace '(?s)<style[^>]*>.*?</style>', ''
@@ -938,6 +965,7 @@ function Export-CcoReport {
     Write-Verbose "Perfil: $SearchPath"
     Write-Verbose "Cache: $EstadoFile"
     Write-Verbose "MaxNotesExport (TXT): $(if ($MaxNotesExport -gt 0) { $MaxNotesExport } else { 'todas' })"
+    Write-Verbose "FilterCustomerVisibleNotesOnly: $($script:CcoConfig.FilterCustomerVisibleNotesOnly)"
 
     $client = [OtrsClient]::new($BaseURL, $RetryMax)
     $client.Login($Username, $Password)
@@ -2969,6 +2997,7 @@ $script:CcoConfig = @{
         'Estado do link Zabbix',
         'Status:\s*(OK|PROBLEM|DISASTER)'
     )
+    FilterCustomerVisibleNotesOnly = $true
 }
 
 # =============================================================================
@@ -2985,6 +3014,9 @@ function Show-Configuracoes {
     $Cfg.SearchPath = Read-Field "Perfil de busca (SearchPath)" $Cfg.SearchPath
     $Cfg.EstadoFile = Read-Field "Arquivo de cache (JSON)"      $Cfg.EstadoFile
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
+    $visDef = if ($Cfg.FilterCustomerVisibleNotesOnly) { 's' } else { 'n' }
+    $visIn = Read-Field "OTRS: so notas visiveis ao cliente (checkbox Ficar visivel para o Cliente) (s/N)" $visDef
+    $Cfg.FilterCustomerVisibleNotesOnly = ($visIn -match '^[Ss]')
     if (-not $Cfg.HubEncaminharPath) { $Cfg.HubEncaminharPath = 'api/relatorio' }
     if (-not $Cfg.HubApiRelatorioPath) { $Cfg.HubApiRelatorioPath = 'api/relatorio' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
@@ -3089,7 +3121,7 @@ function Show-MainMenu {
             '2' { Invoke-GerarJson $Cfg $ExportScript }
             '3' { Show-VisualizadorMenu $Cfg $ExportScript }
             '4' { $Cfg = Show-LoginScreen $Cfg }
-            '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath }
+            '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath; Sync-CcoConfigFromCfg $Cfg }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
             '7' { Invoke-SyncHub $Cfg $ExportScript }
             '0' {
@@ -3111,6 +3143,7 @@ function Show-MainMenu {
 # =============================================================================
 
 $cfg             = Load-Config $ConfigFile
+Sync-CcoConfigFromCfg $cfg
 $exportScriptPath = Resolve-ExportScript $ScriptPath
 
 if (-not $cfg.Username -or -not $cfg.Password) {

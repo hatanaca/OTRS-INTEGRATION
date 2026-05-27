@@ -18,5 +18,6 @@
   "HubBrowserDirectWrite": true,
   "HubWebDriverDebugAddress": "",
   "HubWebDriverBrowser": "Chrome",
-  "HubSeleniumModulePath": ""
+  "HubSeleniumModulePath": "",
+  "FilterCustomerVisibleNotesOnly": true
 }
