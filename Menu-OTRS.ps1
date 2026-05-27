@@ -127,6 +127,8 @@ function Load-Config {
         HubFormSelectors     = $null
         HubWebDriverEnabled  = $false
         HubWebDriverAutoFill = $false
+        HubBrowserDirectWrite = $true
+        HubWebDriverDebugAddress = ''
         HubWebDriverBrowser  = 'Chrome'
         HubSeleniumModulePath = ''
     }
@@ -162,6 +164,15 @@ function Load-Config {
                 elseif ($v2 -is [string]) { $cfg.HubWebDriverAutoFill = $v2.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
                 else { $cfg.HubWebDriverAutoFill = [bool]$v2 }
             }
+            if ($propNames -contains 'HubBrowserDirectWrite') {
+                $vd = $j.HubBrowserDirectWrite
+                if ($vd -is [bool]) { $cfg.HubBrowserDirectWrite = $vd }
+                elseif ($vd -is [string]) { $cfg.HubBrowserDirectWrite = $vd.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
+                else { $cfg.HubBrowserDirectWrite = [bool]$vd }
+            }
+            if ($propNames -contains 'HubWebDriverDebugAddress') {
+                $cfg.HubWebDriverDebugAddress = [string]$j.HubWebDriverDebugAddress
+            }
             if ($propNames -contains 'HubWebDriverBrowser') {
                 $cfg.HubWebDriverBrowser = [string]$j.HubWebDriverBrowser
             }
@@ -192,6 +203,8 @@ function Save-Config {
         HubFormSelectors    = $Cfg.HubFormSelectors
         HubWebDriverEnabled = $Cfg.HubWebDriverEnabled
         HubWebDriverAutoFill = $Cfg.HubWebDriverAutoFill
+        HubBrowserDirectWrite = $Cfg.HubBrowserDirectWrite
+        HubWebDriverDebugAddress = $Cfg.HubWebDriverDebugAddress
         HubWebDriverBrowser = $Cfg.HubWebDriverBrowser
         HubSeleniumModulePath = $Cfg.HubSeleniumModulePath
     } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
@@ -2173,8 +2186,8 @@ $($sbRows.ToString())
     $html | Out-File -LiteralPath $OutPath -Encoding utf8
 }
 
-function Export-HubRelatorioAutofillHelperHtml {
-    param($Payload, [string]$HubPageUrl, [string]$OutPath, [hashtable]$Cfg)
+function Get-HubRelatorioAutofillJavaScript {
+    param($Payload, [hashtable]$Cfg)
 
     $payloadJson = ($Payload | ConvertTo-Json -Depth 12 -Compress)
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($payloadJson))
@@ -2280,7 +2293,7 @@ function Export-HubRelatorioAutofillHelperHtml {
   var form = findTargetTicketForm();
   if (!form) {
     console.warn("[Menu-OTRS] Nenhum .ticket-form encontrado. Abra o Gerador CCO carregado.");
-    return;
+    return false;
   }
   tryFillInForm(form, "number", payload.number || "");
   tryFillInForm(form, "status", payload.status || "");
@@ -2291,9 +2304,16 @@ function Export-HubRelatorioAutofillHelperHtml {
   if (occ) tryFillInForm(form, "occurrence", occ);
   fillUpdatesRelatorio(form, payload.updates || []);
   console.log("[Menu-OTRS] Preenchimento concluido (alinhado a relatorioCco.js). Revise e deixe o Hub gravar (debounce).");
+  return true;
 })();
 '@
-    $jsCore = $jsCore.Replace('B64TOKEN', $b64).Replace('SELTOKEN', $selLiteral)
+    return $jsCore.Replace('B64TOKEN', $b64).Replace('SELTOKEN', $selLiteral)
+}
+
+function Export-HubRelatorioAutofillHelperHtml {
+    param($Payload, [string]$HubPageUrl, [string]$OutPath, [hashtable]$Cfg)
+
+    $jsCore = Get-HubRelatorioAutofillJavaScript -Payload $Payload -Cfg $Cfg
 
     $hubEsc = [System.Net.WebUtility]::HtmlEncode($HubPageUrl)
     $snippetEsc = [System.Net.WebUtility]::HtmlEncode($jsCore)
@@ -2317,7 +2337,7 @@ button{margin-top:.75rem;padding:.55rem 1rem;border-radius:6px;border:none;backg
 </head>
 <body>
 <h1>Preencher o formulario do Gerador CCO no navegador</h1>
-<p>A pagina <strong>$hubEsc</strong> e o formulario do Hub; por seguranca do navegador o Menu-OTRS <span class="warn">nao pode</span> escrever diretamente nessa aba a partir de um ficheiro local. Este fluxo copia um script para colar na <strong>Consola (F12)</strong> <em>ja com o separador do Hub activo</em>.</p>
+<p>A pagina <strong>$hubEsc</strong> e o formulario do Hub. Um ficheiro local <span class="warn">nao pode</span> escrever nessa aba sozinho; use o script abaixo na <strong>Consola (F12)</strong> <em>com o separador do Hub activo</em>, ou active <strong>HubWebDriverEnabled</strong> + <strong>HubBrowserDirectWrite</strong> no <code>config.json</code> para o Menu-OTRS escrever directamente via WebDriver (JavaScript na pagina).</p>
 <ol>
 <li>Abra o Hub e entre na rota do Gerador (login se preciso).</li>
 <li>Deixe essa aba em primeiro plano e pressione <strong>F12</strong> &gt; separador <strong>Consola</strong>.</li>
@@ -2353,13 +2373,14 @@ button{margin-top:.75rem;padding:.55rem 1rem;border-radius:6px;border:none;backg
 }
 
 function Show-HubRelatorioFormHtml {
-    param($Payload, [string]$HubUrl, [hashtable]$Cfg)
+    param($Payload, [string]$HubUrl, [hashtable]$Cfg, [switch]$SkipConsoleHelper)
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $num = [string]$Payload.number
     $fn = 'HubRelatorio_' + $num + '_' + $stamp + '.html'
     $path = Join-Path ([System.IO.Path]::GetTempPath()) $fn
     Export-HubRelatorioFormHtml -Payload $Payload -HubBaseUrl $HubUrl -OutPath $path
     Start-Process -FilePath $path
+    if ($SkipConsoleHelper) { return }
     if (-not $Cfg) { $Cfg = @{} }
     $relEnc = if ($Cfg.HubEncaminharPath -and $Cfg.HubEncaminharPath.ToString().Trim()) {
         $Cfg.HubEncaminharPath.ToString().Trim()
@@ -2407,147 +2428,279 @@ function Import-HubSeleniumModule {
     Import-Module Selenium -ErrorAction Stop
 }
 
+function Test-HubBrowserDirectWriteReady {
+    param([hashtable]$Cfg)
+    if (-not $Cfg -or -not $Cfg.HubWebDriverEnabled) { return $false }
+    if ($Cfg.HubBrowserDirectWrite -eq $false) { return $false }
+    return (Test-HubSeleniumModuleAvailable $Cfg)
+}
+
+function Normalize-HubDebugAddress {
+    param([string]$Raw)
+    $s = ($Raw -as [string]).Trim()
+    if (-not $s) { return '' }
+    if ($s -match '^https?://') { $s = ($s -replace '^https?://', '').TrimEnd('/') }
+    if ($s -match '^(\d+)$') { return '127.0.0.1:' + $Matches[1] }
+    if ($s -notmatch ':') { return ($s + ':9222') }
+    return $s
+}
+
+function Test-HubBrowserDebugEndpoint {
+    param([string]$Address)
+    $a = Normalize-HubDebugAddress $Address
+    if (-not $a) { return $false }
+    try {
+        $null = Invoke-RestMethod -Uri ('http://' + $a + '/json/version') -TimeoutSec 4 -UseBasicParsing
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-SeDriverJavaScript {
+    param($Driver, [string]$Script)
+    if (Get-Command Invoke-SeJavaScript -ErrorAction SilentlyContinue) {
+        return Invoke-SeJavaScript -Driver $Driver -Script $Script
+    }
+    return $Driver.ExecuteScript($Script)
+}
+
+function Wait-HubWebDriverTicketForms {
+    param($Driver, [int]$TimeoutSec = 50)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $list = $Driver.FindElements([OpenQA.Selenium.By]::CssSelector('.ticket-form'))
+            if ($list -and $list.Count -gt 0) { return $list }
+        } catch { }
+        Start-Sleep -Milliseconds 500
+    }
+    return $null
+}
+
+function Switch-HubWebDriverToHubTab {
+    param($Driver, [string]$HubPageUrl)
+    if (-not $Driver -or -not $HubPageUrl) { return $false }
+    $hostHint = ''
+    try { $hostHint = ([uri]$HubPageUrl).Host.ToLower() } catch { }
+    $pathHint = 'relatorio'
+    foreach ($h in $Driver.WindowHandles) {
+        try {
+            $Driver.SwitchTo().Window($h) | Out-Null
+            $u = (($Driver.Url -as [string]).ToLower())
+            if ($u -like ('*' + $pathHint + '*')) { return $true }
+            if ($hostHint -and $u -like ('*' + $hostHint + '*') -and $u -like '*api*') { return $true }
+        } catch { }
+    }
+    return $false
+}
+
+function Start-HubWebDriverSession {
+    param([string]$Browser, [string]$DebugAddress, [hashtable]$Cfg)
+
+    Import-HubSeleniumModule $Cfg
+    $addr = Normalize-HubDebugAddress $DebugAddress
+    $br = ($Browser -as [string]).Trim()
+    $isEdge = ($br -match '^[Ee]dge')
+
+    if ($addr) {
+        if (-not (Test-HubBrowserDebugEndpoint $addr)) {
+            throw ("Browser com depuracao remota nao responde em " + $addr + ". Inicie Chrome/Edge com --remote-debugging-port (ex.: 9222) e HubWebDriverDebugAddress no config.json.")
+        }
+        Write-Info ("WebDriver: a ligar ao browser existente em " + $addr + " (nao abre janela nova).")
+        try {
+            if ($isEdge) {
+                $opts = New-Object OpenQA.Selenium.Edge.EdgeOptions
+                $opts.DebuggerAddress = $addr
+                $svc = [OpenQA.Selenium.Edge.EdgeDriverService]::CreateDefaultService()
+                return @{ Driver = (New-Object OpenQA.Selenium.Edge.EdgeDriver($svc, $opts)); Attached = $true }
+            }
+            $cOpts = New-Object OpenQA.Selenium.Chrome.ChromeOptions
+            $cOpts.DebuggerAddress = $addr
+            $cSvc = [OpenQA.Selenium.Chrome.ChromeDriverService]::CreateDefaultService()
+            return @{ Driver = (New-Object OpenQA.Selenium.Chrome.ChromeDriver($cSvc, $cOpts)); Attached = $true }
+        } catch {
+            throw ("Falha ao ligar ao browser em " + $addr + ": " + $_)
+        }
+    }
+
+    $Driver = $null
+    if ($isEdge -and (Get-Command Start-SeEdge -ErrorAction SilentlyContinue)) {
+        $Driver = Start-SeEdge
+    }
+    if (-not $Driver -and (Get-Command Start-SeChrome -ErrorAction SilentlyContinue)) {
+        $Driver = Start-SeChrome
+    }
+    if (-not $Driver) {
+        throw "Nao foi possivel iniciar Chrome nem Edge (Start-SeChrome / Start-SeEdge). Verifique o modulo Selenium."
+    }
+    return @{ Driver = $Driver; Attached = $false }
+}
+
+function Invoke-HubRelatorioSendKeysFill {
+    param($Driver, $Payload)
+
+    function Set-SeFieldValue {
+        param($Element, [string]$Text)
+        if ($null -eq $Element) { return }
+        Send-SeKeys -Element $Element -Keys ([OpenQA.Selenium.Keys]::Control + 'a')
+        Send-SeKeys -Element $Element -Keys $Text
+    }
+
+    function Set-HubDataField {
+        param($Form, [string]$Field, [string]$Text)
+        if (-not $Form) { return }
+        try {
+            $el = $Form.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="' + $Field + '"]'))
+            Set-SeFieldValue $el $Text
+        } catch { }
+    }
+
+    function Get-HubTargetTicketForm {
+        param($FormList, $Payload)
+        if (-not $FormList -or $FormList.Count -eq 0) { return $null }
+        $want = ([string]$Payload.number).Trim()
+        foreach ($f in $FormList) {
+            try {
+                $inp = $f.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="number"]'))
+                if ($inp -and ($inp.GetAttribute('value') -as [string]).Trim() -eq $want -and $want.Length -gt 0) { return $f }
+            } catch { }
+        }
+        foreach ($f in $FormList) {
+            try {
+                $inp = $f.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="number"]'))
+                if ($inp -and [string]::IsNullOrWhiteSpace(($inp.GetAttribute('value') -as [string]))) { return $f }
+            } catch { }
+        }
+        return $FormList[$FormList.Count - 1]
+    }
+
+    $forms = Wait-HubWebDriverTicketForms -Driver $Driver
+    if (-not $forms -or $forms.Count -eq 0) {
+        throw "Nao foi encontrado .ticket-form no Gerador (aguarde o carregamento ou faca login)."
+    }
+    $form = Get-HubTargetTicketForm $forms $Payload
+    if (-not $form) { throw "Nao foi possivel escolher o formulario do ticket." }
+
+    Set-HubDataField $form 'number' ([string]$Payload.number)
+    Set-HubDataField $form 'status' ([string]$Payload.status)
+    Set-HubDataField $form 'openingDate' ([string]$Payload.openingDate)
+    Set-HubDataField $form 'openingHour' ([string]$Payload.openingHour)
+    Set-HubDataField $form 'client' ([string]$Payload.client)
+    if ($Payload.occurrence -or $Payload.ocorrencia) {
+        $occ = if ($Payload.occurrence) { [string]$Payload.occurrence } else { [string]$Payload.ocorrencia }
+        Set-HubDataField $form 'occurrence' $occ
+    }
+
+    $updates = @($Payload.updates)
+    $uiMaxUpdates = 4
+    if ($updates.Count -gt 0) {
+        try {
+            $entries = $form.FindElements([OpenQA.Selenium.By]::CssSelector('.updates-container .update-entry'))
+        } catch {
+            $entries = $null
+        }
+        if ($entries -and $entries.Count -gt 0) {
+            $n = [Math]::Min([Math]::Min($entries.Count, $updates.Count), $uiMaxUpdates)
+            if ($updates.Count -gt $uiMaxUpdates) {
+                Write-Info ("WebDriver: o Hub mostra no maximo " + $uiMaxUpdates + " atualizacoes; a preencher " + $n.ToString() + " linha(s).")
+            }
+            for ($ri = 0; $ri -lt $n; $ri++) {
+                $row = $entries[$ri]
+                $u = $updates[$ri]
+                $ud = '' ; $uh = '' ; $tx = ''
+                if ($null -ne $u.updateDate) { $ud = [string]$u.updateDate } elseif ($null -ne $u.date) { $ud = [string]$u.date }
+                if ($null -ne $u.updateHour) { $uh = [string]$u.updateHour } elseif ($null -ne $u.hour) { $uh = [string]$u.hour }
+                if ($null -ne $u.text) { $tx = [string]$u.text }
+                try {
+                    $dEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-date'))
+                    Set-SeFieldValue $dEl $ud
+                } catch { }
+                try {
+                    $hEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-hour'))
+                    Set-SeFieldValue $hEl $uh
+                } catch { }
+                try {
+                    $tEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-text'))
+                    Set-SeFieldValue $tEl $tx
+                } catch { }
+            }
+        }
+    }
+}
+
+function Invoke-HubRelatorioJavaScriptFill {
+    param($Driver, $Payload, [hashtable]$Cfg)
+    $js = Get-HubRelatorioAutofillJavaScript -Payload $Payload -Cfg $Cfg
+    $forms = Wait-HubWebDriverTicketForms -Driver $Driver -TimeoutSec 50
+    if (-not $forms -or $forms.Count -eq 0) {
+        throw "Nao foi encontrado .ticket-form no Gerador (aguarde o carregamento ou faca login)."
+    }
+    $ok = Invoke-SeDriverJavaScript -Driver $Driver -Script $js
+    if ($ok -eq $false) {
+        throw "JavaScript de preenchimento nao encontrou .ticket-form no separador activo."
+    }
+}
+
 function Invoke-HubRelatorioSeleniumFill {
     param([string]$HubPageUrl, $Payload, [string]$Browser = 'Chrome', [hashtable]$Cfg)
 
-    Import-HubSeleniumModule $Cfg
-
     $Driver = $null
+    $attached = $false
+    $useJs = ($null -eq $Cfg.HubBrowserDirectWrite) -or ($Cfg.HubBrowserDirectWrite -ne $false)
+    $debugAddr = if ($Cfg -and $Cfg.HubWebDriverDebugAddress) { [string]$Cfg.HubWebDriverDebugAddress } else { '' }
+
     try {
-        $br = ($Browser -as [string]).Trim()
-        if ($br -match '^[Ee]dge') {
-            if (Get-Command Start-SeEdge -ErrorAction SilentlyContinue) {
-                $Driver = Start-SeEdge
-            }
-        }
-        if (-not $Driver -and (Get-Command Start-SeChrome -ErrorAction SilentlyContinue)) {
-            $Driver = Start-SeChrome
-        }
-        if (-not $Driver) {
-            throw "Nao foi possivel iniciar Chrome nem Edge (Start-SeChrome / Start-SeEdge). Verifique o modulo Selenium."
-        }
+        $session = Start-HubWebDriverSession -Browser $Browser -DebugAddress $debugAddr -Cfg $Cfg
+        $Driver = $session.Driver
+        $attached = [bool]$session.Attached
 
-        Enter-SeUrl -Url $HubPageUrl -Driver $Driver
-
-        function Wait-HubTicketForms {
-            param([int]$TimeoutSec = 50)
-            $deadline = (Get-Date).AddSeconds($TimeoutSec)
-            while ((Get-Date) -lt $deadline) {
-                try {
-                    $list = $Driver.FindElements([OpenQA.Selenium.By]::CssSelector('.ticket-form'))
-                    if ($list -and $list.Count -gt 0) { return $list }
-                } catch { }
-                Start-Sleep -Milliseconds 500
-            }
-            return $null
-        }
-
-        function Get-HubTargetTicketForm {
-            param($FormList, $Payload)
-            if (-not $FormList -or $FormList.Count -eq 0) { return $null }
-            $want = ([string]$Payload.number).Trim()
-            foreach ($f in $FormList) {
-                try {
-                    $inp = $f.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="number"]'))
-                    if ($inp -and ($inp.GetAttribute('value') -as [string]).Trim() -eq $want -and $want.Length -gt 0) { return $f }
-                } catch { }
-            }
-            foreach ($f in $FormList) {
-                try {
-                    $inp = $f.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="number"]'))
-                    if ($inp -and [string]::IsNullOrWhiteSpace(($inp.GetAttribute('value') -as [string]))) { return $f }
-                } catch { }
-            }
-            return $FormList[$FormList.Count - 1]
-        }
-
-        function Set-SeFieldValue {
-            param($Element, [string]$Text)
-            if ($null -eq $Element) { return }
-            Send-SeKeys -Element $Element -Keys ([OpenQA.Selenium.Keys]::Control + 'a')
-            Send-SeKeys -Element $Element -Keys $Text
-        }
-
-        function Set-HubDataField {
-            param($Form, [string]$Field, [string]$Text)
-            if (-not $Form) { return }
-            try {
-                $el = $Form.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="' + $Field + '"]'))
-                Set-SeFieldValue $el $Text
-            } catch { }
-        }
-
-        $forms = Wait-HubTicketForms
-        if (-not $forms -or $forms.Count -eq 0) {
-            throw "Nao foi encontrado .ticket-form no Gerador (aguarde o carregamento ou faca login)."
-        }
-        $form = Get-HubTargetTicketForm $forms $Payload
-        if (-not $form) { throw "Nao foi possivel escolher o formulario do ticket." }
-
-        Set-HubDataField $form 'number' ([string]$Payload.number)
-        Set-HubDataField $form 'status' ([string]$Payload.status)
-        Set-HubDataField $form 'openingDate' ([string]$Payload.openingDate)
-        Set-HubDataField $form 'openingHour' ([string]$Payload.openingHour)
-        Set-HubDataField $form 'client' ([string]$Payload.client)
-        if ($Payload.occurrence -or $Payload.ocorrencia) {
-            $occ = if ($Payload.occurrence) { [string]$Payload.occurrence } else { [string]$Payload.ocorrencia }
-            Set-HubDataField $form 'occurrence' $occ
-        }
-
-        $updates = @($Payload.updates)
-        $uiMaxUpdates = 4
-        if ($updates.Count -gt 0) {
-            try {
-                $entries = $form.FindElements([OpenQA.Selenium.By]::CssSelector('.updates-container .update-entry'))
-            } catch {
-                $entries = $null
-            }
-            if ($entries -and $entries.Count -gt 0) {
-                $n = [Math]::Min([Math]::Min($entries.Count, $updates.Count), $uiMaxUpdates)
-                if ($updates.Count -gt $uiMaxUpdates) {
-                    Write-Info ("Selenium: o Hub (relatorioCco.js) mostra no maximo " + $uiMaxUpdates + " atualizacoes; a preencher " + $n.ToString() + " linha(s).")
+        if ($attached) {
+            $null = Switch-HubWebDriverToHubTab -Driver $Driver -HubPageUrl $HubPageUrl
+            $forms = Wait-HubWebDriverTicketForms -Driver $Driver -TimeoutSec 8
+            if (-not $forms -or $forms.Count -eq 0) {
+                if (Get-Command Enter-SeUrl -ErrorAction SilentlyContinue) {
+                    Enter-SeUrl -Url $HubPageUrl -Driver $Driver
+                } else {
+                    $Driver.Navigate().GoToUrl($HubPageUrl) | Out-Null
                 }
-                for ($ri = 0; $ri -lt $n; $ri++) {
-                    $row = $entries[$ri]
-                    $u = $updates[$ri]
-                    $ud = '' ; $uh = '' ; $tx = ''
-                    if ($null -ne $u.updateDate) { $ud = [string]$u.updateDate } elseif ($null -ne $u.date) { $ud = [string]$u.date }
-                    if ($null -ne $u.updateHour) { $uh = [string]$u.updateHour } elseif ($null -ne $u.hour) { $uh = [string]$u.hour }
-                    if ($null -ne $u.text) { $tx = [string]$u.text }
-                    try {
-                        $dEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-date'))
-                        Set-SeFieldValue $dEl $ud
-                    } catch { }
-                    try {
-                        $hEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-hour'))
-                        Set-SeFieldValue $hEl $uh
-                    } catch { }
-                    try {
-                        $tEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-text'))
-                        Set-SeFieldValue $tEl $tx
-                    } catch { }
-                }
+            }
+        } else {
+            if (Get-Command Enter-SeUrl -ErrorAction SilentlyContinue) {
+                Enter-SeUrl -Url $HubPageUrl -Driver $Driver
             } else {
-                Write-Info "Selenium: nao ha .updates-container .update-entry no formulario alvo."
+                $Driver.Navigate().GoToUrl($HubPageUrl) | Out-Null
             }
         }
 
-        Write-OK "Selenium: campos preenchidos (data-field / relatorioCco.js). Faca login se necessario; o Hub grava com debounce ao alterar campos."
+        if ($useJs) {
+            Write-Info "WebDriver: a escrever directamente na pagina (JavaScript / DOM, relatorioCco.js)..."
+            Invoke-HubRelatorioJavaScriptFill -Driver $Driver -Payload $Payload -Cfg $Cfg
+            Write-OK "WebDriver: formulario preenchido directamente no navegador. Faca login se necessario; o Hub grava com debounce."
+        } else {
+            Write-Info "WebDriver: preenchimento por teclas (HubBrowserDirectWrite=false)..."
+            Invoke-HubRelatorioSendKeysFill -Driver $Driver -Payload $Payload
+            Write-OK "WebDriver: campos preenchidos (SendKeys). Faca login se necessario."
+        }
     } catch {
-        Write-Warn ("Selenium: " + $_)
+        Write-Warn ("WebDriver: " + $_)
     } finally {
         if ($null -ne $Driver) {
-            Write-Host "  Encerrar o WebDriver (fecha o browser automatizado)? [S/n]: " -ForegroundColor Yellow -NoNewline
-            $q = Read-Host
-            if ($q -eq '' -or $q -match '^[Ss]') {
-                try {
-                    if (Get-Command Stop-SeDriver -ErrorAction SilentlyContinue) {
-                        Stop-SeDriver -Target $Driver
-                    } else {
-                        $Driver.Quit()
+            if ($attached) {
+                Write-Info "Ligacao WebDriver terminada; o Chrome/Edge permanece aberto."
+            } else {
+                Write-Host "  Encerrar o WebDriver (fecha o browser automatizado)? [S/n]: " -ForegroundColor Yellow -NoNewline
+                $q = Read-Host
+                if ($q -eq '' -or $q -match '^[Ss]') {
+                    try {
+                        if (Get-Command Stop-SeDriver -ErrorAction SilentlyContinue) {
+                            Stop-SeDriver -Target $Driver
+                        } else {
+                            $Driver.Quit()
+                        }
+                    } catch {
+                        Write-Warn ("Nao foi possivel encerrar o WebDriver: " + $_)
                     }
-                } catch {
-                    Write-Warn ("Nao foi possivel encerrar o WebDriver: " + $_)
                 }
             }
         }
@@ -2556,28 +2709,33 @@ function Invoke-HubRelatorioSeleniumFill {
 
 function Invoke-HubMaybeSeleniumFormFill {
     param([hashtable]$Cfg, [string]$HubUrl, [string]$EncPathRel, $Payload)
-    if (-not $Cfg.HubWebDriverEnabled) { return }
+    if (-not $Cfg.HubWebDriverEnabled) { return $false }
     if (-not (Test-HubSeleniumModuleAvailable $Cfg)) {
         Write-Warn "HubWebDriverEnabled=true mas o Selenium nao foi encontrado. Copie o modulo para tools\Selenium\ ou defina HubSeleniumModulePath no config.json (ver tools\Selenium\README.md)."
-        return
+        return $false
     }
     $runNow = $false
     if ($Cfg.HubWebDriverAutoFill -eq $true) {
         $runNow = $true
         Write-Host ""
-        Write-Info "Selenium: a iniciar preenchimento automatico do Gerador (HubWebDriverAutoFill=true)..."
+        Write-Info "WebDriver: preenchimento directo no navegador (HubWebDriverAutoFill=true)..."
     } else {
         Write-Host ""
-        Write-Host "  Preencher o Gerador CCO via Selenium (nova janela de browser)? [s/N]: " -ForegroundColor Yellow -NoNewline
+        Write-Host "  Escrever directamente no Gerador CCO via WebDriver (JavaScript na pagina)? [s/N]: " -ForegroundColor Yellow -NoNewline
         $a = Read-Host
         if ($a -match '^[Ss]') { $runNow = $true }
     }
-    if (-not $runNow) { return }
+    if (-not $runNow) { return $false }
     $page = Get-HubEncaminharUri $HubUrl $EncPathRel
     $br = if ($Cfg.HubWebDriverBrowser -and $Cfg.HubWebDriverBrowser.ToString().Trim()) {
         $Cfg.HubWebDriverBrowser.ToString().Trim()
     } else { 'Chrome' }
+    $dbg = if ($Cfg.HubWebDriverDebugAddress) { ($Cfg.HubWebDriverDebugAddress -as [string]).Trim() } else { '' }
+    if ($dbg) {
+        Write-Info ("Modo ligacao: browser ja aberto (HubWebDriverDebugAddress=" + $dbg + "). Deixe o Gerador CCO carregado ou faca login na janela.")
+    }
     Invoke-HubRelatorioSeleniumFill -HubPageUrl $page -Payload $Payload -Browser $br -Cfg $Cfg
+    return $true
 }
 
 function Invoke-HubPerguntaAbrirEncaminhar {
@@ -2600,8 +2758,9 @@ function Invoke-SyncHub {
     Write-Banner
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
-    Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, HTML de revisao + guia consola; opcionalmente Selenium (WebDriver) para preencher o Gerador; depois confirmacao e API."
-    Write-Info "Com HubWebDriverEnabled=true e Selenium disponivel, o Gerador pode ser preenchido pelo WebDriver (pergunta s/N ou HubWebDriverAutoFill=true)."
+    Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, HTML de revisao; WebDriver escreve directamente no Gerador (JavaScript); depois confirmacao e API."
+    Write-Info "HubWebDriverEnabled + Selenium: escrita directa no DOM (HubBrowserDirectWrite=true) ou ligacao ao Chrome/Edge aberto (HubWebDriverDebugAddress)."
+    Write-Info "Auto-fill: HubWebDriverAutoFill=true inicia WebDriver sem pergunta s/N."
     Write-Info "A sincronizacao por API (GET/POST/PUT em .../tickets) grava no servidor; depois pode abrir o Hub na rota configurada (padrao api/relatorio)."
     Write-Host ""
 
@@ -2703,8 +2862,9 @@ function Invoke-SyncHub {
                 $payload = Build-HubTicket $ticket -Ocorrencia $occ
                 Show-HubTicketPreview $payload
                 Write-Info "Abrindo formulario HTML de revisao no navegador..."
-                try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
-                Invoke-HubMaybeSeleniumFormFill $Cfg $hubUrl $encPathRel $payload
+                $skipHelper = (Test-HubBrowserDirectWriteReady $Cfg) -and ($Cfg.HubWebDriverAutoFill -eq $true)
+                try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg -SkipConsoleHelper:$skipHelper } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+                Invoke-HubMaybeSeleniumFormFill $Cfg $hubUrl $encPathRel $payload | Out-Null
                 Write-Host ""
                 Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
                 $null = Read-Host "  Pressione Enter para continuar"
@@ -2737,8 +2897,9 @@ function Invoke-SyncHub {
             $payload = Build-HubTicket $ticket -Ocorrencia $occ
             Show-HubTicketPreview $payload
             Write-Info "Abrindo formulario HTML de revisao no navegador..."
-            try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
-            Invoke-HubMaybeSeleniumFormFill $Cfg $hubUrl $encPathRel $payload
+            $skipHelper = (Test-HubBrowserDirectWriteReady $Cfg) -and ($Cfg.HubWebDriverAutoFill -eq $true)
+            try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg -SkipConsoleHelper:$skipHelper } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+            Invoke-HubMaybeSeleniumFormFill $Cfg $hubUrl $encPathRel $payload | Out-Null
             Write-Host ""
             Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
             $null = Read-Host "  Pressione Enter para continuar"
@@ -2844,14 +3005,19 @@ function Show-Configuracoes {
     $Cfg.HubWebDriverEnabled = ($wdIn -match '^[Ss]')
     if ($Cfg.HubWebDriverEnabled) {
         $afDef = if ($Cfg.HubWebDriverAutoFill) { 's' } else { 'n' }
-        $afIn = Read-Field "Hub: Selenium inicia sozinho apos abrir o HTML (sem pergunta s/N) (s/N)" $afDef
+        $afIn = Read-Field "Hub: WebDriver inicia sozinho (escrita directa, sem pergunta s/N) (s/N)" $afDef
         $Cfg.HubWebDriverAutoFill = ($afIn -match '^[Ss]')
+        $dwDef = if ($Cfg.HubBrowserDirectWrite -ne $false) { 's' } else { 'n' }
+        $dwIn = Read-Field "Hub: escrever directamente na pagina via JavaScript (HubBrowserDirectWrite) (s/N)" $dwDef
+        $Cfg.HubBrowserDirectWrite = ($dwIn -match '^[Ss]')
     } else {
         $Cfg.HubWebDriverAutoFill = $false
     }
     $Cfg.HubWebDriverBrowser = Read-Field "Hub WebDriver: browser (Chrome ou Edge)" ([string]$Cfg.HubWebDriverBrowser)
     if (-not ($Cfg.HubWebDriverBrowser -as [string]).Trim()) { $Cfg.HubWebDriverBrowser = 'Chrome' }
+    $Cfg.HubWebDriverDebugAddress = Read-Field "Hub: ligar ao browser aberto (ex.: 127.0.0.1:9222; vazio = nova janela WebDriver)" ([string]$Cfg.HubWebDriverDebugAddress)
     $Cfg.HubSeleniumModulePath = Read-Field "Hub: caminho Selenium.psd1 ou pasta do modulo (vazio = Gallery ou tools\Selenium)" ([string]$Cfg.HubSeleniumModulePath)
+    Write-Info "Browser aberto: chrome.exe --remote-debugging-port=9222 (ou edge) + HubWebDriverDebugAddress=127.0.0.1:9222"
     Write-Info "Sem Install-Module: copie o modulo para tools\Selenium junto ao Menu-OTRS.ps1 ou aponte HubSeleniumModulePath — tools\Selenium\README.md"
     Write-Info "Selenium Gallery (se permitido): Install-Module Selenium -Scope CurrentUser"
     Write-Info "Opcional: HubFormSelectors no config.json (JSON) afinar selectores ao colar o script na consola do Hub — ver README."
@@ -2909,7 +3075,7 @@ function Show-MainMenu {
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
         Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub (URL, API, email/senha API)'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
-        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'API + HTML; Selenium opcional; JSON+ajuda se API falhar'
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'API + HTML; WebDriver escreve directo no Gerador; JSON+ajuda se API falhar'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
