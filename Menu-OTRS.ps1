@@ -2072,8 +2072,10 @@ function Export-HubRelatorioFormHtml {
     $ix = 0
     foreach ($u in @($Payload.updates)) {
         $ix++
-        $ud = HtmlEsc ([string](if ($u.updateDate) { $u.updateDate } else { $u.date }))
-        $uh = HtmlEsc ([string](if ($u.updateHour) { $u.updateHour } else { $u.hour }))
+        $udRaw = if ($u.updateDate) { $u.updateDate } else { $u.date }
+        $uhRaw = if ($u.updateHour) { $u.updateHour } else { $u.hour }
+        $ud = HtmlEsc ([string]$udRaw)
+        $uh = HtmlEsc ([string]$uhRaw)
         $ut = HtmlEsc ([string]$u.text)
         $ut = ($ut -replace "`r`n", '<br/>') -replace "`n", '<br/>'
         [void]$sbRows.Append('<tr><td>').Append($ix).Append('</td><td>').Append($ud).Append(' ')
