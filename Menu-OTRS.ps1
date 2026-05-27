@@ -15,6 +15,13 @@ $ErrorActionPreference = 'Stop'
 
 $script:ExportLoaded = $false
 
+# -----------------------------------------------------------------------------
+# Hub: padroes se config.json nao definir HubEmail / HubPassword.
+# Edite abaixo; valores em config.json (menu 5) prevalecem quando a chave existir.
+# -----------------------------------------------------------------------------
+$script:MenuOtrsHubDefaultEmail    = 'thiago.ratanaka@microset.net.br'
+$script:MenuOtrsHubDefaultPassword = ''
+
 # =============================================================================
 # Helpers de UI
 # =============================================================================
@@ -111,8 +118,8 @@ function Load-Config {
         SearchPath         = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
         HubBaseURL           = 'http://172.16.0.49:3210'
         HubEncaminharPath    = 'home'
-        HubEmail             = ''
-        HubPassword          = ''
+        HubEmail             = ([string]$script:MenuOtrsHubDefaultEmail).Trim()
+        HubPassword          = [string]$script:MenuOtrsHubDefaultPassword
         HubApiRelatorioPath  = 'api/relatorio'
     }
     if (Test-Path $Path) {

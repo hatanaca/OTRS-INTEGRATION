@@ -25,7 +25,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubPassword` | Senha do Hub para a mesma API — **texto claro**; opcional com Enter na sincronização para reutilizar a gravada |
 | `HubApiRelatorioPath` | Caminho relativo à URL base para listar/criar relatórios (padrão `api/relatorio`). Se o servidor responder `Cannot POST /api/relatorio`, ajuste para o caminho real (ex.: `api/relatorios`), conforme o Hub expõe na rede (DevTools → Network). |
 
-Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git.
+Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
 ## Menu principal
 
