@@ -27,8 +27,8 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubPostTicketPaths` | (Opcional) Caminhos POST para criar ticket, separados por `;` ou `,`. Vazio = ordem automática: **`api/relatorio/tickets`** primeiro, depois `…/ticket`, prefixo raiz e outras rotas. |
 | `HubPutTicketPaths` | (Opcional) Caminhos PUT; use `{numero}` para o número OTRS. Vazio = tenta `…/tickets/{numero}`, `…/{numero}`, `…/ticket/{numero}`, etc. |
 | `HubFormSelectors` | (Opcional) Objeto JSON: por campo (`number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence`) uma lista de selectores CSS a tentar **antes** dos padroes, ao usar a pagina «Preencher Hub» (script na consola). |
-| `HubWebDriverEnabled` | Se `true`, na opção **7** o Menu-OTRS pode **escrever directamente** no Gerador CCO via WebDriver (JavaScript na página). Requer Selenium (Gallery, `tools\Selenium\` ou `HubSeleniumModulePath`). |
-| `HubWebDriverAutoFill` | Se `true` (e `HubWebDriverEnabled`), inicia o WebDriver e preenche **sem** pergunta `s/N`. |
+| `HubWebDriverEnabled` | Se `true` (padrão no script), na opção **7** o Menu-OTRS **escreve directamente** no Gerador CCO via WebDriver (JavaScript na página). Requer Selenium (Gallery, `tools\Selenium\` ou `HubSeleniumModulePath`). |
+| `HubWebDriverAutoFill` | Se `true` (padrão no script), inicia o WebDriver e preenche **sem** pergunta `s/N`. Defina `false` no `config.json` para voltar a confirmar no terminal. |
 | `HubBrowserDirectWrite` | Se `true` (padrão), o WebDriver injecta o mesmo JavaScript da consola no DOM (`HubBrowserDirectWrite=false` usa SendKeys). |
 | `HubWebDriverDebugAddress` | (Opcional) Ligar ao Chrome/Edge **já aberto** (ex.: `127.0.0.1:9222`). Inicie o browser com `--remote-debugging-port=9222`; o Menu-OTRS não fecha essa janela. |
 | `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |

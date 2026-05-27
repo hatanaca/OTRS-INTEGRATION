@@ -125,8 +125,8 @@ function Load-Config {
         HubPostTicketPaths   = ''
         HubPutTicketPaths    = ''
         HubFormSelectors     = $null
-        HubWebDriverEnabled  = $false
-        HubWebDriverAutoFill = $false
+        HubWebDriverEnabled  = $true
+        HubWebDriverAutoFill = $true
         HubBrowserDirectWrite = $true
         HubWebDriverDebugAddress = ''
         HubWebDriverBrowser  = 'Chrome'
