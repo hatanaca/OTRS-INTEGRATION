@@ -26,6 +26,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubApiRelatorioPath` | Prefixo da API (padrão `api/relatorio`). A lista é lida com **GET** `…/tickets` (corpo JSON com `tickets[]`); se falhar, tenta o prefixo sozinho (hubs legados). |
 | `HubPostTicketPaths` | (Opcional) Caminhos POST para criar ticket, separados por `;` ou `,`. Vazio = ordem automática: **`api/relatorio/tickets`** primeiro, depois `…/ticket`, prefixo raiz e outras rotas. |
 | `HubPutTicketPaths` | (Opcional) Caminhos PUT; use `{numero}` para o número OTRS. Vazio = tenta `…/tickets/{numero}`, `…/{numero}`, `…/ticket/{numero}`, etc. |
+| `HubFormSelectors` | (Opcional) Objeto JSON: por campo (`number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence`) uma lista de selectores CSS a tentar **antes** dos padroes, ao usar a pagina «Preencher Hub» (script na consola). |
 
 Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
@@ -40,7 +41,7 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
-7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets` para a lista (e metadados como `syncVersion` vêm nessa resposta no Hub atual); **POST** `…/api/relatorio/tickets` para criar ticket. O prefixo é configurável (`HubApiRelatorioPath`). A **página** `…/api/relatorio` no navegador continua a ser o *Gerador CCO*. Após `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`).
+7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets` para a lista; **POST**/`PUT` nos caminhos configurados. Abre-se HTML de pré-visualização e outro com **script para colar na consola** do Gerador (`/api/relatorio`) e preencher o formulário. Após `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`).
 
 ### Normalização (avisos ao operador)
 
@@ -51,6 +52,23 @@ Nos modos em tempo real e ao recarregar o cache (`R` no visualizador offline), s
 O payload segue o front `relatorioCco.js`: `number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence` (quando preenchido), e `updates` como objetos com **`updateDate`**, **`updateHour`** e **`text`**. No terminal, a ocorrência opcional continua a preencher `ocorrencia` e `occurrence` no JSON.
 
 Antes do envio, o script gera um arquivo HTML temporário com o mesmo conteúdo e abre o navegador para **validação visual** pelo operador; o envio só ocorre após confirmação no terminal.
+
+### Preencher o formulário HTML do Gerador (`/api/relatorio`)
+
+A rota **`http://…/api/relatorio`** é sobretudo a **interface** (campos que o operador vê). Por política de **origem** do navegador, um ficheiro local ou outro site **não pode** escrever nessa página automaticamente.
+
+Na opção **7**, além do HTML de pré-visualização, abre-se uma segunda página (**Preencher Hub**) com um **script autocontido**: copie-o, mude para o separador do Hub com o Gerador aberto, **F12 → Consola**, cole e **Enter**. O script tenta preencher número, estado, datas, cliente, ocorrência e linhas da tabela de atualizações (heurística por `input`/`textarea` e nomes comuns). Se o Hub usar React ou IDs diferentes, defina **`HubFormSelectors`** no `config.json` (listas de selectores CSS por campo, tentados antes dos padrões).
+
+Alternativa sem consola: use apenas a **API** (confirmação no terminal); os tickets passam a existir no servidor e o Gerador costuma **listá-los** após recarregar ou conforme o `relatorioCco.js` sincroniza.
+
+Exemplo de `HubFormSelectors` (inspecione o DOM do Hub com F12 → inspetor):
+
+```json
+"HubFormSelectors": {
+  "number": ["#meuCampoNumero"],
+  "client": ["textarea[name=\"client\"]"]
+}
+```
 
 A página **`/api/relatorio`** do Hub é o gerador integrado; o **browser** usa `GET /api/relatorio/sync` para polling leve e `GET`/`POST` em **`/api/relatorio/tickets`** para lista e criação (conforme HAR do `relatorioCco.js`). O Menu-OTRS espelha o **POST**/**GET** de tickets nessa rota quando o prefixo é `api/relatorio`.
 
@@ -66,5 +84,5 @@ O login usa JSON seguro (`ConvertTo-Json`) para evitar problemas com caracteres 
 ## Fluxo sugerido no Hub
 
 1. Autenticar no Hub (`/guest` ou rota de login da sua instalação).
-2. A página **`/api/relatorio`** (Gerador de Relatório CCO) sincroniza com a API: o Menu-OTRS (opção 7) envia/atualiza tickets; no browser os campos são preenchidos e **gravados** conforme o fluxo do `relatorioCco.js`.
+2. Na mesma máquina, com o **Gerador** (`/api/relatorio`) aberto, use a segunda página HTML gerada pela opção **7** para **copiar o script** e colá-lo na **Consola** (F12), preenchendo o formulário; ou confie só na **API** e recarregue o Gerador para ver os tickets.
 3. Use **Gerar Relatório**, **Copiar**, **WhatsApp** ou **E-mail** na própria página quando quiser concluir o envio ao CCO/cliente.

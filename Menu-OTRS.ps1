@@ -124,6 +124,7 @@ function Load-Config {
         HubApiRelatorioPath  = 'api/relatorio'
         HubPostTicketPaths   = ''
         HubPutTicketPaths    = ''
+        HubFormSelectors     = $null
     }
     if (Test-Path $Path) {
         try {
@@ -142,6 +143,9 @@ function Load-Config {
             if ($propNames -contains 'HubPutTicketPaths')  { $cfg.HubPutTicketPaths  = [string]$j.HubPutTicketPaths  }
             if ($propNames -contains 'HubEmail')    { $cfg.HubEmail    = [string]$j.HubEmail }
             if ($propNames -contains 'HubPassword') { $cfg.HubPassword = [string]$j.HubPassword }
+            if ($propNames -contains 'HubFormSelectors' -and $null -ne $j.HubFormSelectors) {
+                $cfg.HubFormSelectors = $j.HubFormSelectors
+            }
         } catch { }
     }
     return $cfg
@@ -163,7 +167,8 @@ function Save-Config {
         HubApiRelatorioPath = $Cfg.HubApiRelatorioPath
         HubPostTicketPaths  = $Cfg.HubPostTicketPaths
         HubPutTicketPaths   = $Cfg.HubPutTicketPaths
-    } | ConvertTo-Json | Out-File $Path -Encoding UTF8
+        HubFormSelectors    = $Cfg.HubFormSelectors
+    } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
 }
 
 function Get-CfgStatus {
@@ -2142,12 +2147,187 @@ $($sbRows.ToString())
     $html | Out-File -LiteralPath $OutPath -Encoding utf8
 }
 
+function Export-HubRelatorioAutofillHelperHtml {
+    param($Payload, [string]$HubPageUrl, [string]$OutPath, [hashtable]$Cfg)
+
+    $payloadJson = ($Payload | ConvertTo-Json -Depth 12 -Compress)
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($payloadJson))
+    $selLiteral = '{}'
+    if ($Cfg -and $null -ne $Cfg.HubFormSelectors) {
+        $selLiteral = ($Cfg.HubFormSelectors | ConvertTo-Json -Depth 12 -Compress)
+    }
+
+    $jsCore = @'
+(function(){
+  "use strict";
+  var payload = JSON.parse(new TextDecoder("utf-8").decode(Uint8Array.from(atob("B64TOKEN"), function(c){ return c.charCodeAt(0); })));
+  var selO = SELTOKEN;
+  function selList(key) {
+    var o = selO[key];
+    var def = (DEFAULT_SEL[key] || []).slice();
+    if (Array.isArray(o) && o.length) return o.concat(def);
+    if (typeof o === "string" && o.trim()) return [o.trim()].concat(def);
+    return def;
+  }
+  var DEFAULT_SEL = {
+    number: ["input[name=\"number\"]","#number","input#number","[data-field=\"number\"]"],
+    status: ["input[name=\"status\"]","select[name=\"status\"]","#status","[data-field=\"status\"]"],
+    openingDate: ["input[name=\"openingDate\"]","#openingDate","[data-field=\"openingDate\"]"],
+    openingHour: ["input[name=\"openingHour\"]","#openingHour","[data-field=\"openingHour\"]"],
+    client: ["textarea[name=\"client\"]","input[name=\"client\"]","#client","[data-field=\"client\"]"],
+    occurrence: ["textarea[name=\"occurrence\"]","textarea[name=\"ocorrencia\"]","#occurrence","#ocorrencia","[data-field=\"occurrence\"]"]
+  };
+  function setNativeValue(el, value) {
+    if (!el || value === undefined || value === null) return false;
+    var v = String(value);
+    if (el.tagName === "SELECT") {
+      el.value = v;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    var proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) { desc.set.call(el, v); }
+    else { el.value = v; }
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
+  function tryFill(key, value) {
+    var arr = selList(key);
+    for (var i = 0; i < arr.length; i++) {
+      try {
+        var el = document.querySelector(arr[i]);
+        if (el) {
+          setNativeValue(el, value);
+          console.log("[Menu-OTRS] Campo \"" + key + "\" via " + arr[i]);
+          return true;
+        }
+      } catch (e) { console.warn(e); }
+    }
+    console.warn("[Menu-OTRS] Campo nao encontrado: " + key);
+    return false;
+  }
+  tryFill("number", payload.number || "");
+  tryFill("status", payload.status || "");
+  tryFill("openingDate", payload.openingDate || "");
+  tryFill("openingHour", payload.openingHour || "");
+  tryFill("client", payload.client || "");
+  var occ = (payload.occurrence || payload.ocorrencia || "");
+  if (occ) tryFill("occurrence", occ);
+  var updates = payload.updates || [];
+  var tables = document.querySelectorAll("table");
+  var best = null;
+  for (var ti = 0; ti < tables.length; ti++) {
+    var trs = tables[ti].querySelectorAll("tbody tr");
+    if (trs.length >= updates.length && updates.length > 0) { best = trs; break; }
+  }
+  if (!best && tables.length) {
+    var last = tables[tables.length - 1];
+    best = last.querySelectorAll("tbody tr");
+  }
+  if (best && best.length && updates.length) {
+    for (var r = 0; r < updates.length && r < best.length; r++) {
+      var row = best[r];
+      var fields = row.querySelectorAll("input, textarea");
+      var u = updates[r];
+      var ud = u.updateDate || u.date || "";
+      var uh = u.updateHour || u.hour || "";
+      var tx = u.text || "";
+      if (fields.length >= 3) {
+        setNativeValue(fields[0], ud);
+        setNativeValue(fields[1], uh);
+        setNativeValue(fields[2], tx);
+        console.log("[Menu-OTRS] Linha atualizacao " + (r + 1));
+      } else if (fields.length === 2) {
+        setNativeValue(fields[0], ud);
+        setNativeValue(fields[1], tx);
+      } else if (fields.length === 1) {
+        setNativeValue(fields[0], tx);
+      }
+    }
+  } else {
+    console.warn("[Menu-OTRS] Tabela de atualizacoes nao casou; verifique HubFormSelectors no config.json.");
+  }
+  console.log("[Menu-OTRS] Preenchimento concluido. Revise os campos e grave no Hub.");
+})();
+'@
+    $jsCore = $jsCore.Replace('B64TOKEN', $b64).Replace('SELTOKEN', $selLiteral)
+
+    $hubEsc = [System.Net.WebUtility]::HtmlEncode($HubPageUrl)
+    $snippetEsc = [System.Net.WebUtility]::HtmlEncode($jsCore)
+    $html = @"
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Preencher Hub — #$($Payload.number)</title>
+<style>
+body{font-family:Segoe UI,Tahoma,sans-serif;margin:1.25rem;background:#0f172a;color:#e2e8f0;max-width:48rem;}
+h1{font-size:1.1rem;}
+p,li{color:#94a3b8;font-size:.95rem;line-height:1.45;}
+a.btn,a.btn:visited{display:inline-block;margin:.5rem .5rem 0 0;padding:.55rem 1rem;background:#2563eb;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;}
+textarea{width:100%;min-height:16rem;font-family:Consolas,monospace;font-size:11px;background:#020617;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:10px;}
+button{margin-top:.75rem;padding:.55rem 1rem;border-radius:6px;border:none;background:#059669;color:#fff;font-weight:600;cursor:pointer;}
+.box{border:1px solid #334155;border-radius:8px;padding:1rem;margin:1rem 0;background:#1e293b;}
+.warn{color:#fbbf24;}
+</style>
+</head>
+<body>
+<h1>Preencher o formulario do Gerador CCO no navegador</h1>
+<p>A pagina <strong>$hubEsc</strong> e o formulario do Hub; por seguranca do navegador o Menu-OTRS <span class="warn">nao pode</span> escrever diretamente nessa aba a partir de um ficheiro local. Este fluxo copia um script para colar na <strong>Consola (F12)</strong> <em>ja com o separador do Hub activo</em>.</p>
+<ol>
+<li>Abra o Hub e entre na rota do Gerador (login se preciso).</li>
+<li>Deixe essa aba em primeiro plano e pressione <strong>F12</strong> &gt; separador <strong>Consola</strong>.</li>
+<li>Aqui em baixo: <strong>Copiar script</strong>, volte ao Hub, <strong>Cole</strong> na consola e <strong>Enter</strong>.</li>
+<li>Confira os campos e use o botao de gravar / fluxo normal do Hub.</li>
+</ol>
+<p class="warn">Se algum campo nao mudar (React), ajuste os selectores em <code>HubFormSelectors</code> no <code>config.json</code> (menu 5) — ver README.</p>
+<p><a class="btn" href="$hubEsc" target="_blank" rel="noopener">Abrir Gerador CCO no Hub</a></p>
+<div class="box">
+<label for="sn"><strong>Script para colar na consola do Hub</strong></label>
+<textarea id="sn" readonly>$snippetEsc</textarea>
+<p><button type="button" id="cp">Copiar script</button></p>
+</div>
+<script>
+(function(){
+  var t = document.getElementById("sn");
+  document.getElementById("cp").onclick = function() {
+    t.select();
+    t.setSelectionRange(0, 99999999);
+    try { navigator.clipboard.writeText(t.value); alert("Copiado. Cole na consola da aba do Hub."); }
+    catch (e) { try { document.execCommand("copy"); alert("Copiado (modo legado)."); } catch (e2) { alert("Use Ctrl+C no texto."); } }
+  };
+})();
+</script>
+</body>
+</html>
+"@
+    $dir = [System.IO.Path]::GetDirectoryName($OutPath)
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $html | Out-File -LiteralPath $OutPath -Encoding utf8
+}
+
 function Show-HubRelatorioFormHtml {
-    param($Payload, [string]$HubUrl)
-    $fn = 'HubRelatorio_' + [string]$Payload.number + '_' + (Get-Date -Format 'yyyyMMddHHmmss') + '.html'
+    param($Payload, [string]$HubUrl, [hashtable]$Cfg)
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $num = [string]$Payload.number
+    $fn = 'HubRelatorio_' + $num + '_' + $stamp + '.html'
     $path = Join-Path ([System.IO.Path]::GetTempPath()) $fn
     Export-HubRelatorioFormHtml -Payload $Payload -HubBaseUrl $HubUrl -OutPath $path
     Start-Process -FilePath $path
+    if (-not $Cfg) { $Cfg = @{} }
+    $relEnc = if ($Cfg.HubEncaminharPath -and $Cfg.HubEncaminharPath.ToString().Trim()) {
+        $Cfg.HubEncaminharPath.ToString().Trim()
+    } else { 'api/relatorio' }
+    $hubPage = Get-HubEncaminharUri $HubUrl $relEnc
+    $fn2 = 'HubRelatorio_PreencherHub_' + $num + '_' + $stamp + '.html'
+    $path2 = Join-Path ([System.IO.Path]::GetTempPath()) $fn2
+    Export-HubRelatorioAutofillHelperHtml -Payload $Payload -HubPageUrl $hubPage -OutPath $path2 -Cfg $Cfg
+    Start-Process -FilePath $path2
 }
 
 function Invoke-HubPerguntaAbrirEncaminhar {
@@ -2170,9 +2350,9 @@ function Invoke-SyncHub {
     Write-Banner
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
-    Write-Info "Fluxo: resumo no terminal, Ocorrencia opcional, formulario HTML no navegador, confirmacao e envio (API)."
-    Write-Info "A pagina Hub /api/relatorio (Gerador CCO) preenche e grava tickets; WhatsApp/Email sao na propria UI apos Gerar Relatorio."
-    Write-Info "Apos cada envio API bem-sucedido, podera abrir o Hub na rota configurada (padrao api/relatorio)."
+    Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, duas paginas HTML (pre-visualizacao + guia para preencher o formulario no Hub), confirmacao e envio pela API."
+    Write-Info "O Gerador CCO (ex.: /api/relatorio) e o formulario no browser; o guia HTML gera um script para colar na Consola (F12) nessa aba e preencher campos."
+    Write-Info "A sincronizacao por API (GET/POST/PUT em .../tickets) grava no servidor; depois pode abrir o Hub na rota configurada (padrao api/relatorio)."
     Write-Host ""
 
     # Credenciais do Hub (opcional: HubEmail / HubPassword em config.json)
@@ -2273,7 +2453,7 @@ function Invoke-SyncHub {
                 $payload = Build-HubTicket $ticket -Ocorrencia $occ
                 Show-HubTicketPreview $payload
                 Write-Info "Abrindo formulario HTML de revisao no navegador..."
-                try { Show-HubRelatorioFormHtml $payload $hubUrl } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+                try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
                 Write-Host ""
                 Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
                 $null = Read-Host "  Pressione Enter para continuar"
@@ -2306,7 +2486,7 @@ function Invoke-SyncHub {
             $payload = Build-HubTicket $ticket -Ocorrencia $occ
             Show-HubTicketPreview $payload
             Write-Info "Abrindo formulario HTML de revisao no navegador..."
-            try { Show-HubRelatorioFormHtml $payload $hubUrl } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+            try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
             Write-Host ""
             Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
             $null = Read-Host "  Pressione Enter para continuar"
@@ -2407,6 +2587,7 @@ function Show-Configuracoes {
     Write-Info "Avancado: se o POST/PUT automatico falhar, defina rotas (separadas por ;). Deixe vazio para tentativas automaticas."
     $Cfg.HubPostTicketPaths = Read-Field "Hub POST (vazio=auto; principal: api/relatorio/tickets; legado: api/relatorio/ticket)" ([string]$Cfg.HubPostTicketPaths)
     $Cfg.HubPutTicketPaths  = Read-Field "Hub PUT (vazio=auto; {numero} = n. OTRS; ex.: api/relatorio/tickets/{numero})" ([string]$Cfg.HubPutTicketPaths)
+    Write-Info "Opcional: HubFormSelectors no config.json (JSON) afinar selectores ao colar o script na consola do Hub — ver README."
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host

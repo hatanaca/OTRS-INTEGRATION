@@ -11,5 +11,6 @@
   "HubPassword": "",
   "HubApiRelatorioPath": "api/relatorio",
   "HubPostTicketPaths": "",
-  "HubPutTicketPaths": ""
+  "HubPutTicketPaths": "",
+  "HubFormSelectors": null
 }
