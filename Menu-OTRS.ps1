@@ -109,8 +109,11 @@ function Load-Config {
         EstadoFile         = 'estado_chamados.json'
         OutputPath         = $PWD.Path
         SearchPath         = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
-        HubBaseURL         = 'http://172.16.0.49:3210'
-        HubEncaminharPath  = 'home'
+        HubBaseURL           = 'http://172.16.0.49:3210'
+        HubEncaminharPath    = 'home'
+        HubEmail             = ''
+        HubPassword          = ''
+        HubApiRelatorioPath  = 'api/relatorio'
     }
     if (Test-Path $Path) {
         try {
@@ -121,8 +124,12 @@ function Load-Config {
             if ($j.EstadoFile)  { $cfg.EstadoFile  = $j.EstadoFile  }
             if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
             if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
-            if ($j.HubBaseURL)        { $cfg.HubBaseURL        = $j.HubBaseURL        }
-            if ($j.HubEncaminharPath) { $cfg.HubEncaminharPath = $j.HubEncaminharPath }
+            if ($j.HubBaseURL)           { $cfg.HubBaseURL           = $j.HubBaseURL           }
+            if ($j.HubEncaminharPath)    { $cfg.HubEncaminharPath    = $j.HubEncaminharPath    }
+            if ($j.HubApiRelatorioPath)  { $cfg.HubApiRelatorioPath  = $j.HubApiRelatorioPath  }
+            $propNames = @($j.PSObject.Properties | ForEach-Object { $_.Name })
+            if ($propNames -contains 'HubEmail')    { $cfg.HubEmail    = [string]$j.HubEmail }
+            if ($propNames -contains 'HubPassword') { $cfg.HubPassword = [string]$j.HubPassword }
         } catch { }
     }
     return $cfg
@@ -137,8 +144,11 @@ function Save-Config {
         EstadoFile  = $Cfg.EstadoFile
         OutputPath  = $Cfg.OutputPath
         SearchPath  = $Cfg.SearchPath
-        HubBaseURL        = $Cfg.HubBaseURL
-        HubEncaminharPath = $Cfg.HubEncaminharPath
+        HubBaseURL          = $Cfg.HubBaseURL
+        HubEncaminharPath   = $Cfg.HubEncaminharPath
+        HubEmail            = $Cfg.HubEmail
+        HubPassword         = $Cfg.HubPassword
+        HubApiRelatorioPath = $Cfg.HubApiRelatorioPath
     } | ConvertTo-Json | Out-File $Path -Encoding UTF8
 }
 
@@ -1611,6 +1621,45 @@ function Show-Visualizador {
 # =============================================================================
 $script:HubSession = $null
 
+function Get-HubRelatorioPathPrefix {
+    param([hashtable]$Cfg)
+    $p = 'api/relatorio'
+    if ($null -ne $Cfg.HubApiRelatorioPath -and $Cfg.HubApiRelatorioPath.ToString().Trim()) {
+        $p = $Cfg.HubApiRelatorioPath.ToString().Trim().TrimStart('/')
+    }
+    if (-not $p.StartsWith('/')) { $p = '/' + $p }
+    return $p
+}
+
+function Get-HubHttpErrorDetail {
+    param($ErrRecord)
+    try {
+        if ($ErrRecord.ErrorDetails -and $ErrRecord.ErrorDetails.Message) {
+            $ed = ($ErrRecord.ErrorDetails.Message -as [string]).Trim()
+            if ($ed.Length -gt 0) { return $ed }
+        }
+    } catch { }
+    $msg = $ErrRecord.Exception.Message
+    try {
+        $resp = $ErrRecord.Exception.Response
+        if ($resp) {
+            $code = [int]$resp.StatusCode
+            $stream = $resp.GetResponseStream()
+            if ($stream) {
+                $rdr = New-Object System.IO.StreamReader($stream)
+                $body = $rdr.ReadToEnd()
+                if ($body) {
+                    $short = ($body -replace '[\r\n]+', ' ')
+                    if ($short.Length -gt 280) { $short = $short.Substring(0, 277) + '...' }
+                    return ("HTTP " + $code + ": " + $short)
+                }
+                return ("HTTP " + $code + ": " + $msg)
+            }
+        }
+    } catch { }
+    return $msg
+}
+
 function Hub-Login {
     param([string]$HubUrl, [string]$Email, [string]$Pass)
     $base = $HubUrl.TrimEnd('/')
@@ -1625,29 +1674,56 @@ function Hub-Login {
 function Hub-Get {
     param([string]$HubUrl, [string]$Path)
     $base = $HubUrl.TrimEnd('/')
+    if (-not $Path.StartsWith('/')) { $Path = '/' + $Path }
     $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method GET -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+        -Method GET -WebSession $script:HubSession -UseBasicParsing `
+        -Headers @{ Accept = 'application/json' }
+    $raw = ($resp.Content -as [string]).Trim()
+    if ($raw.Length -eq 0) { return $null }
+    if ($raw.Length -lt 2) { return $null }
+    $c0 = $raw[0]
+    if ($c0 -ne '[' -and $c0 -ne '{') {
+        throw ("Resposta nao-JSON em GET " + $Path + ": " + ($raw.Substring(0, [Math]::Min(200, $raw.Length))))
+    }
+    return $raw | ConvertFrom-Json
 }
 
 function Hub-Post {
     param([string]$HubUrl, [string]$Path, $Body)
     $base = $HubUrl.TrimEnd('/')
+    if (-not $Path.StartsWith('/')) { $Path = '/' + $Path }
+    $uri = $base + $Path
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method POST -ContentType "application/json" -Body $json `
-        -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    try {
+        $resp = Invoke-WebRequest -Uri $uri `
+            -Method POST -ContentType "application/json; charset=utf-8" -Body $json `
+            -WebSession $script:HubSession -UseBasicParsing `
+            -Headers @{ Accept = 'application/json' } -ErrorAction Stop
+        $out = ($resp.Content -as [string]).Trim()
+        if ($out.Length -eq 0) { return $null }
+        return $out | ConvertFrom-Json
+    } catch {
+        throw ((Get-HubHttpErrorDetail $_) + " (POST " + $uri + ")")
+    }
 }
 
 function Hub-Put {
     param([string]$HubUrl, [string]$Path, $Body)
     $base = $HubUrl.TrimEnd('/')
+    if (-not $Path.StartsWith('/')) { $Path = '/' + $Path }
+    $uri = $base + $Path
     $json = $Body | ConvertTo-Json -Depth 8
-    $resp = Invoke-WebRequest -Uri ($base + $Path) `
-        -Method PUT -ContentType "application/json" -Body $json `
-        -WebSession $script:HubSession -UseBasicParsing
-    return $resp.Content | ConvertFrom-Json
+    try {
+        $resp = Invoke-WebRequest -Uri $uri `
+            -Method PUT -ContentType "application/json; charset=utf-8" -Body $json `
+            -WebSession $script:HubSession -UseBasicParsing `
+            -Headers @{ Accept = 'application/json' } -ErrorAction Stop
+        $out = ($resp.Content -as [string]).Trim()
+        if ($out.Length -eq 0) { return $null }
+        return $out | ConvertFrom-Json
+    } catch {
+        throw ((Get-HubHttpErrorDetail $_) + " (PUT " + $uri + ")")
+    }
 }
 
 function Build-HubTicket {
@@ -1868,16 +1944,41 @@ function Invoke-SyncHub {
     Write-Info "Apos cada envio bem-sucedido, podera abrir o Hub para o passo de encaminhamento na interface web."
     Write-Host ""
 
-    # Credenciais do Hub
+    # Credenciais do Hub (opcional: HubEmail / HubPassword em config.json)
     $hubDefault = if ($Cfg.HubBaseURL) { $Cfg.HubBaseURL } else { 'http://172.16.0.49:3210' }
     $hubUrl   = Read-Field "URL do Hub" $hubDefault
-    $hubEmail = Read-Field "Email Hub"  ""
-    Write-Host "  Senha Hub: " -ForegroundColor Yellow -NoNewline
-    $hubPass = Read-Host
+    $defEmail = if ($Cfg.HubEmail) { [string]$Cfg.HubEmail } else { '' }
+    $hubEmail = Read-Field "Email Hub" $defEmail
+    if (-not ($hubEmail -as [string]).Trim()) {
+        Write-Err "Email Hub obrigatorio. Configure em Configuracoes (opcao 5) ou informe aqui."
+        Pause-Screen; return
+    }
+    $storedPass = if ($Cfg.HubPassword) { [string]$Cfg.HubPassword } else { '' }
+    if ($storedPass.Length -gt 0) {
+        Write-Host "  Senha Hub [Enter = usar senha salva no config.json]: " -ForegroundColor Yellow -NoNewline
+    } else {
+        Write-Host "  Senha Hub: " -ForegroundColor Yellow -NoNewline
+    }
+    $hubPassIn = Read-Host
+    if ($hubPassIn) {
+        $hubPass = $hubPassIn
+    } elseif ($storedPass.Length -gt 0) {
+        $hubPass = $storedPass
+    } else {
+        Write-Err "Senha Hub obrigatoria. Salve HubPassword em config.json (opcao 5 ou 6) ou digite aqui."
+        Pause-Screen; return
+    }
     $hubUrl = $hubUrl.TrimEnd('/')
     $encPathRel = if ($Cfg.HubEncaminharPath -and $Cfg.HubEncaminharPath.ToString().Trim()) {
         $Cfg.HubEncaminharPath.ToString().Trim()
     } else { 'home' }
+    $apiRelRoot = Get-HubRelatorioPathPrefix $Cfg
+    Write-Host ""
+    Write-Info ("API relatorio (GET/POST): " + $hubUrl + $apiRelRoot)
+    Write-Info ("API atualizacao (PUT):    " + $hubUrl + $apiRelRoot + "/{numeroTicket}")
+    if (-not $storedPass) {
+        Write-Info "Dica: defina HubEmail e HubPassword em config.json (menu 5) para login automatico."
+    }
     Write-Host ""
 
     # Login
@@ -1893,7 +1994,7 @@ function Invoke-SyncHub {
     Write-Info "Buscando tickets no Hub..."
     $existingMap = @{}
     try {
-        $hubTickets = Hub-Get $hubUrl "/api/relatorio"
+        $hubTickets = Hub-Get $hubUrl $apiRelRoot
         if ($null -ne $hubTickets) {
             if ($hubTickets -is [System.Array]) {
                 foreach ($ht in $hubTickets) {
@@ -1954,12 +2055,12 @@ function Invoke-SyncHub {
                 $r = Read-Host
                 if ($r -eq '' -or $r -match '^[Ss]') {
                     try {
-                        Hub-Put $hubUrl ("/api/relatorio/" + $num) $payload | Out-Null
+                        Hub-Put $hubUrl ($apiRelRoot.TrimEnd('/') + '/' + $num) $payload | Out-Null
                         Write-OK ("Atualizado: #" + $num)
                         $nUpd++
                         Invoke-HubPerguntaAbrirEncaminhar $hubUrl $encPathRel
                     } catch {
-                        Write-Warn ("Falha: " + $_)
+                        Write-Warn ("Falha: " + (Get-HubHttpErrorDetail $_))
                     }
                 } else {
                     Write-Info ("Pulado: #" + $num) ; $nSkip++
@@ -1985,12 +2086,12 @@ function Invoke-SyncHub {
             $r = Read-Host
             if ($r -eq '' -or $r -match '^[Ss]') {
                 try {
-                    Hub-Post $hubUrl "/api/relatorio" $payload | Out-Null
+                    Hub-Post $hubUrl $apiRelRoot $payload | Out-Null
                     Write-OK ("Adicionado: #" + $num)
                     $nNew++
                     Invoke-HubPerguntaAbrirEncaminhar $hubUrl $encPathRel
                 } catch {
-                    Write-Warn ("Falha: " + $_)
+                    Write-Warn ("Falha: " + (Get-HubHttpErrorDetail $_))
                 }
             } else {
                 Write-Info ("Pulado: #" + $num) ; $nSkip++
@@ -2062,8 +2163,15 @@ function Show-Configuracoes {
     $Cfg.EstadoFile = Read-Field "Arquivo de cache (JSON)"      $Cfg.EstadoFile
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
     if (-not $Cfg.HubEncaminharPath) { $Cfg.HubEncaminharPath = 'home' }
+    if (-not $Cfg.HubApiRelatorioPath) { $Cfg.HubApiRelatorioPath = 'api/relatorio' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
     $Cfg.HubEncaminharPath = Read-Field "Hub: rota web apos envio (encaminhar ex.: home ou relatorio)" $Cfg.HubEncaminharPath
+    $Cfg.HubApiRelatorioPath = Read-Field "Hub: caminho API relatorio (GET/POST; ex.: api/relatorio ou api/relatorios)" $Cfg.HubApiRelatorioPath
+    $Cfg.HubEmail = Read-Field "Hub: email (login API /api/login)" ([string]$Cfg.HubEmail)
+    $hpHint = if ($Cfg.HubPassword -and $Cfg.HubPassword.ToString().Length -gt 0) { "[senha gravada; Enter mantem]" } else { "[sem senha salva]" }
+    Write-Host ("  Hub: senha API " + $hpHint + ": ") -ForegroundColor Yellow -NoNewline
+    $hpNew = Read-Host
+    if ($hpNew) { $Cfg.HubPassword = $hpNew }
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
@@ -2116,9 +2224,9 @@ function Show-MainMenu {
         Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
-        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Perfil de busca, cache, pasta de saida, URL do Hub'
+        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub (URL, API, email/senha API)'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
-        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'HTML + validacao; API /api/relatorio; opcao abrir Hub para encaminhar'
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login API; GET/POST/PUT em HubApiRelatorioPath; HTML + encaminhar'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""

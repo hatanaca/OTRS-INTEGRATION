@@ -8,7 +8,7 @@ Script PowerShell `Menu-OTRS.ps1` para exportar relatórios CCO a partir do Znun
 
 ### Acentuação e símbolos nas notas
 
-As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no cabeçalho `Content-Type` ou na meta da página; se UTF-8 não bater com os bytes (caracteres substitutos), o script tenta **Windows-1252** e **ISO-8859-1**, comuns em conteúdo legado em português. O ficheiro `Menu-OTRS.ps1` deve ser guardado em **UTF-8** (idealmente com BOM no Windows PowerShell 5.1, conforme o cabeçalho do próprio script).
+As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no cabeçalho `Content-Type` ou na meta da página; se UTF-8 não bater com os bytes (caracteres substitutos), o script tenta **Windows-1252** e **ISO-8859-1**, comuns em conteúdo legado em português. O arquivo `Menu-OTRS.ps1` deve ser guardado em **UTF-8** (idealmente com BOM no Windows PowerShell 5.1, conforme o cabeçalho do próprio script).
 
 ## Configuração (`config.json`)
 
@@ -21,6 +21,11 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `OutputPath` | Pasta de saída dos relatórios |
 | `HubBaseURL` | URL base do Hub (ex.: `http://172.16.0.49:3210`) para opção de sincronização |
 | `HubEncaminharPath` | Rota web relativa após cada envio bem-sucedido (padrão `home`), usada ao abrir o navegador para encaminhar o relatório na interface |
+| `HubEmail` | E-mail do login JSON do Hub (`POST /api/login`) — opcional; se preenchido, a opção 7 usa como padrão |
+| `HubPassword` | Senha do Hub para a mesma API — **texto claro**; opcional com Enter na sincronização para reutilizar a gravada |
+| `HubApiRelatorioPath` | Caminho relativo à URL base para listar/criar relatórios (padrão `api/relatorio`). Se o servidor responder `Cannot POST /api/relatorio`, ajuste para o caminho real (ex.: `api/relatorios`), conforme o Hub expõe na rede (DevTools → Network). |
+
+Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git.
 
 ## Menu principal
 
@@ -33,7 +38,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
-7. **Sincronizar com Hub** — Login em `/api/login` (JSON); leitura de `/api/relatorio`; para cada inclusão ou alteração: resumo no terminal, **Ocorrência** opcional (texto multilinha), **pré-visualização em HTML** no navegador (espelho do payload da API), confirmação do operador e então `POST` ou `PUT` em `/api/relatorio`. Após sucesso, pergunta se deseja abrir o Hub (`HubEncaminharPath`, por padrão `/home`) para o passo de **encaminhar** na interface web.
+7. **Sincronizar com Hub** — Login em `/api/login` (JSON); leitura e envio usam o caminho configurável `HubApiRelatorioPath` (padrão `api/relatorio`, ou seja, `GET`/`POST` em `/api/relatorio` e `PUT` em `/api/relatorio/{numero}`). Fluxo: resumo, ocorrência opcional, HTML de revisão, confirmação e `POST`/`PUT`. Após sucesso, opção de abrir o Hub (`HubEncaminharPath`). Se `HubEmail` / `HubPassword` existirem em `config.json`, o login na opção 7 pode ser só *Enter* na senha.
 
 ### Normalização (avisos ao operador)
 
@@ -44,6 +49,11 @@ Nos modos em tempo real e ao recarregar o cache (`R` no visualizador offline), s
 O payload enviado contém: número do ticket, status, data/hora de abertura, cliente e lista de atualizações (texto/data). O campo **Ocorrência** pode ser informado no terminal durante a sincronização; se preenchido, é incluído no JSON como `ocorrencia` (o Hub precisa aceitar esse campo na API; caso contrário, deixe em branco).
 
 Antes do envio, o script gera um arquivo HTML temporário com o mesmo conteúdo e abre o navegador para **validação visual** pelo operador; o envio só ocorre após confirmação no terminal.
+
+### Erros comuns
+
+- **`Cannot POST /...`** (HTTP 404): o caminho da API no servidor não corresponde ao padrão. No navegador, com o Hub autenticado, abra as ferramentas de rede e veja qual URL o front usa para criar relatório; copie só a parte após o host (ex.: `api/v1/relatorios`) para `HubApiRelatorioPath` no `config.json` ou no menu **Configurações** (5).
+- **`JSON primitivo inválido` / lista vazia na leitura**: o `GET` de listagem devolveu corpo que não é JSON (por exemplo `.` ou HTML). Com `HubApiRelatorioPath` correto e sessão válida após login, a resposta deve ser um array ou objeto JSON.
 
 A detecção de mudança para atualização compara: status, cliente, data/hora de abertura e **todas** as entradas de atualização (não só a contagem de notas). Se o payload incluir `ocorrencia`, essa propriedade também entra na comparação com o registo existente no Hub.
 
