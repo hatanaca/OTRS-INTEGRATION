@@ -1,5 +1,11 @@
 # Automatizar o preenchimento do Gerador CCO (`/api/relatorio`)
 
+## Opção mais compacta (sem permissões de instalação)
+
+1. **Só o browser:** na opção **7**, use a página **«Preencher Hub»** e cole o script na **Consola (F12)** no Gerador — **zero** módulos PowerShell.
+2. **Selenium sem `Install-Module`:** copie o módulo para `tools\Selenium\` ao lado do `Menu-OTRS.ps1` ou defina **`HubSeleniumModulePath`** no `config.json` (pasta vinda de `Save-Module` noutro PC). Instruções: **`tools/Selenium/README.md`**.
+3. **Só ficheiros de utilizador:** noutro posto, `Save-Module -Name Selenium -Path "$env:USERPROFILE\Documents\WindowsPowerShell\Modules"` (muitas vezes **não** precisa de admin; depende da política).
+
 O Menu-OTRS **não consegue**, sozinho e só com HTTP a partir do PowerShell, simular cliques e teclas **dentro** do separador do Chrome/Edge já aberto pelo utilizador. Para “automação nativa” do formulário existem três famílias de solução.
 
 ## 1. Alterar o Hub (recomendado para o produto final)
@@ -35,7 +41,7 @@ Menos habitual para formulários web complexos: extensão que recebe JSON (mensa
 
 ## Integrar com o Menu-OTRS
 
-No `config.json` defina **`HubWebDriverEnabled`** como `true` e **`HubWebDriverBrowser`** como `Chrome` ou `Edge`. Instale o módulo: `Install-Module Selenium -Scope CurrentUser`. Na **opção 7**, após abrir os HTML de revisão, o script pergunta se deseja abrir o WebDriver e preencher o Gerador (nova janela de browser; **faça login no Hub** nessa janela se a sessão for independente da API).
+No `config.json` defina **`HubWebDriverEnabled`** como `true` e **`HubWebDriverBrowser`** como `Chrome` ou `Edge`. O Selenium pode vir da **Gallery** (`Install-Module Selenium -Scope CurrentUser`), de uma pasta **`tools\Selenium\`** ao lado do script, ou de **`HubSeleniumModulePath`** — ver **`tools/Selenium/README.md`** se não puder instalar módulos.
 
 Sem alterar o `config.json`, o fluxo Selenium **não** é oferecido (apenas HTML + API).
 

@@ -127,6 +127,7 @@ function Load-Config {
         HubFormSelectors     = $null
         HubWebDriverEnabled  = $false
         HubWebDriverBrowser  = 'Chrome'
+        HubSeleniumModulePath = ''
     }
     if (Test-Path $Path) {
         try {
@@ -157,6 +158,9 @@ function Load-Config {
             if ($propNames -contains 'HubWebDriverBrowser') {
                 $cfg.HubWebDriverBrowser = [string]$j.HubWebDriverBrowser
             }
+            if ($propNames -contains 'HubSeleniumModulePath') {
+                $cfg.HubSeleniumModulePath = [string]$j.HubSeleniumModulePath
+            }
         } catch { }
     }
     return $cfg
@@ -181,6 +185,7 @@ function Save-Config {
         HubFormSelectors    = $Cfg.HubFormSelectors
         HubWebDriverEnabled = $Cfg.HubWebDriverEnabled
         HubWebDriverBrowser = $Cfg.HubWebDriverBrowser
+        HubSeleniumModulePath = $Cfg.HubSeleniumModulePath
     } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
 }
 
@@ -2343,14 +2348,46 @@ function Show-HubRelatorioFormHtml {
     Start-Process -FilePath $path2
 }
 
+function Get-MenuOtrsScriptRoot {
+    if (-not [string]::IsNullOrEmpty($PSScriptRoot)) { return $PSScriptRoot }
+    return $PWD.Path
+}
+
+function Resolve-HubSeleniumModuleManifest {
+    param([hashtable]$Cfg)
+    $raw = if ($Cfg -and $Cfg.HubSeleniumModulePath) { ($Cfg.HubSeleniumModulePath -as [string]).Trim() } else { '' }
+    if ($raw) {
+        if (Test-Path -LiteralPath $raw -PathType Leaf) { return $raw }
+        if (Test-Path -LiteralPath $raw -PathType Container) {
+            $m = Join-Path $raw.TrimEnd('\', '/') 'Selenium.psd1'
+            if (Test-Path -LiteralPath $m) { return $m }
+        }
+    }
+    $portable = Join-Path (Get-MenuOtrsScriptRoot) 'tools\Selenium\Selenium.psd1'
+    if (Test-Path -LiteralPath $portable) { return $portable }
+    return $null
+}
+
 function Test-HubSeleniumModuleAvailable {
+    param([hashtable]$Cfg)
+    if ($null -ne (Resolve-HubSeleniumModuleManifest $Cfg)) { return $true }
     return [bool](Get-Module -ListAvailable -Name Selenium)
 }
 
-function Invoke-HubRelatorioSeleniumFill {
-    param([string]$HubPageUrl, $Payload, [string]$Browser = 'Chrome')
-
+function Import-HubSeleniumModule {
+    param([hashtable]$Cfg)
+    $manifest = Resolve-HubSeleniumModuleManifest $Cfg
+    if ($manifest) {
+        Import-Module -LiteralPath $manifest -Force -ErrorAction Stop
+        return
+    }
     Import-Module Selenium -ErrorAction Stop
+}
+
+function Invoke-HubRelatorioSeleniumFill {
+    param([string]$HubPageUrl, $Payload, [string]$Browser = 'Chrome', [hashtable]$Cfg)
+
+    Import-HubSeleniumModule $Cfg
 
     $Driver = $null
     try {
@@ -2474,8 +2511,8 @@ function Invoke-HubRelatorioSeleniumFill {
 function Invoke-HubMaybeSeleniumFormFill {
     param([hashtable]$Cfg, [string]$HubUrl, [string]$EncPathRel, $Payload)
     if (-not $Cfg.HubWebDriverEnabled) { return }
-    if (-not (Test-HubSeleniumModuleAvailable)) {
-        Write-Warn "HubWebDriverEnabled=true mas o modulo Selenium nao esta instalado (Install-Module Selenium -Scope CurrentUser)."
+    if (-not (Test-HubSeleniumModuleAvailable $Cfg)) {
+        Write-Warn "HubWebDriverEnabled=true mas o Selenium nao foi encontrado. Copie o modulo para tools\Selenium\ ou defina HubSeleniumModulePath no config.json (ver tools\Selenium\README.md)."
         return
     }
     Write-Host ""
@@ -2486,7 +2523,7 @@ function Invoke-HubMaybeSeleniumFormFill {
     $br = if ($Cfg.HubWebDriverBrowser -and $Cfg.HubWebDriverBrowser.ToString().Trim()) {
         $Cfg.HubWebDriverBrowser.ToString().Trim()
     } else { 'Chrome' }
-    Invoke-HubRelatorioSeleniumFill -HubPageUrl $page -Payload $Payload -Browser $br
+    Invoke-HubRelatorioSeleniumFill -HubPageUrl $page -Payload $Payload -Browser $br -Cfg $Cfg
 }
 
 function Invoke-HubPerguntaAbrirEncaminhar {
@@ -2510,7 +2547,7 @@ function Invoke-SyncHub {
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
     Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, HTML de revisao + guia consola; opcionalmente Selenium (WebDriver) para preencher o Gerador; depois confirmacao e API."
-    Write-Info "Com HubWebDriverEnabled=true e modulo Selenium instalado, pode abrir-se uma janela de browser automatizada no Gerador CCO."
+    Write-Info "Com HubWebDriverEnabled=true e Selenium disponivel (Gallery, tools\Selenium ou HubSeleniumModulePath), pode abrir-se o WebDriver no Gerador CCO."
     Write-Info "A sincronizacao por API (GET/POST/PUT em .../tickets) grava no servidor; depois pode abrir o Hub na rota configurada (padrao api/relatorio)."
     Write-Host ""
 
@@ -2753,7 +2790,9 @@ function Show-Configuracoes {
     $Cfg.HubWebDriverEnabled = ($wdIn -match '^[Ss]')
     $Cfg.HubWebDriverBrowser = Read-Field "Hub WebDriver: browser (Chrome ou Edge)" ([string]$Cfg.HubWebDriverBrowser)
     if (-not ($Cfg.HubWebDriverBrowser -as [string]).Trim()) { $Cfg.HubWebDriverBrowser = 'Chrome' }
-    Write-Info "Selenium: Install-Module Selenium -Scope CurrentUser (API classica Start-SeChrome). Ver docs/automacao-formulario-hub.md."
+    $Cfg.HubSeleniumModulePath = Read-Field "Hub: caminho Selenium.psd1 ou pasta do modulo (vazio = Gallery ou tools\Selenium)" ([string]$Cfg.HubSeleniumModulePath)
+    Write-Info "Sem Install-Module: copie o modulo para tools\Selenium junto ao Menu-OTRS.ps1 ou aponte HubSeleniumModulePath — tools\Selenium\README.md"
+    Write-Info "Selenium Gallery (se permitido): Install-Module Selenium -Scope CurrentUser"
     Write-Info "Opcional: HubFormSelectors no config.json (JSON) afinar selectores ao colar o script na consola do Hub — ver README."
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline

@@ -29,6 +29,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubFormSelectors` | (Opcional) Objeto JSON: por campo (`number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence`) uma lista de selectores CSS a tentar **antes** dos padroes, ao usar a pagina «Preencher Hub» (script na consola). |
 | `HubWebDriverEnabled` | Se `true`, na opção **7** (após abrir os HTML) pergunta se deve abrir **Selenium WebDriver** e preencher o Gerador CCO numa nova janela de browser. Requer `Install-Module Selenium`. |
 | `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |
+| `HubSeleniumModulePath` | (Opcional) Caminho para `Selenium.psd1` ou para a pasta do módulo Selenium **copiada** (sem `Install-Module`). Vazio = usa `tools\Selenium\` junto ao `Menu-OTRS.ps1` ou o módulo na Gallery. |
 
 Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
@@ -63,7 +64,7 @@ Na opção **7**, além do HTML de pré-visualização, abre-se uma segunda pág
 
 Alternativa sem consola: use apenas a **API** (confirmação no terminal); os tickets passam a existir no servidor e o Gerador costuma **listá-los** após recarregar ou conforme o `relatorioCco.js` sincroniza.
 
-Para **automação nativa** no formulário, defina **`HubWebDriverEnabled`** no `config.json`, instale o módulo **Selenium** e use a opção **7** (o script pergunta antes de abrir o WebDriver). Detalhes em **`docs/automacao-formulario-hub.md`**. Alternativa: alterar o Hub para aceitar rascunho por URL/API no mesmo *origin*.
+Para **automação nativa** no formulário: **`HubWebDriverEnabled`**, Selenium via **Gallery**, pasta **`tools\Selenium\`** ou **`HubSeleniumModulePath`** (sem admin — ver **`tools/Selenium/README.md`**). A opção mais leve continua a ser o **script na consola** (página «Preencher Hub»). Alternativa: alterar o Hub para rascunho por URL/API.
 
 Exemplo de `HubFormSelectors` (inspecione o DOM do Hub com F12 → inspetor):
 

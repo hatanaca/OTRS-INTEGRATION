@@ -1,2 +1,6 @@
 # Credenciais locais (OTRS + Hub); use config.example.json como modelo
 config.json
+
+# Modulo Selenium copiado localmente (ver tools/Selenium/README.md)
+tools/Selenium/*
+!tools/Selenium/README.md

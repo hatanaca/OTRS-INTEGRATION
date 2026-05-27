@@ -6,6 +6,7 @@
 .DESCRIPTION
     NAO e chamado pelo Menu-OTRS por defeito (use HubWebDriverEnabled=true
     no config.json para o fluxo integrado na opcao 7 — ver docs/automacao-formulario-hub.md).
+    Selenium sem Gallery: copie o modulo para tools\Selenium\ ou use HubSeleniumModulePath.
     Use este ficheiro isoladamente quando quiser automacao real no formulario.
 
     Pre-requisitos:
