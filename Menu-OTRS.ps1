@@ -1452,6 +1452,13 @@ function Show-VisualizadorMenu {
 }
 
 
+# Compat: copias antigas chamavam Show-Visualizador no menu (funcao inexistente).
+function Show-Visualizador {
+    param([hashtable]$Cfg, [string]$ExportScript)
+    Show-VisualizadorMenu $Cfg $ExportScript
+}
+
+
 # =============================================================================
 # Integracao com Hub (http://172.16.0.49:3210)
 # =============================================================================
