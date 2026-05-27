@@ -1452,6 +1452,13 @@ function Show-VisualizadorMenu {
 }
 
 
+# Nome antigo usado em copias do menu; evita erro se o switch ainda chamar Show-Visualizador.
+function Show-Visualizador {
+    param([hashtable]$Cfg, [string]$ExportScript)
+    Show-VisualizadorMenu $Cfg $ExportScript
+}
+
+
 # =============================================================================
 # Integracao com Hub (http://172.16.0.49:3210)
 # =============================================================================
