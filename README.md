@@ -61,6 +61,8 @@ Na opção **7**, além do HTML de pré-visualização, abre-se uma segunda pág
 
 Alternativa sem consola: use apenas a **API** (confirmação no terminal); os tickets passam a existir no servidor e o Gerador costuma **listá-los** após recarregar ou conforme o `relatorioCco.js` sincroniza.
 
+Para **automação nativa** (browser a escrever nos campos sem colar na consola), o Menu-OTRS em si não substitui o WebDriver: veja o guia **`docs/automacao-formulario-hub.md`** e o exemplo **`scripts/Exemplo-HubRelatorio-Selenium.ps1`** (Selenium + PowerShell), ou altere o Hub para aceitar rascunho por URL/API no mesmo *origin*.
+
 Exemplo de `HubFormSelectors` (inspecione o DOM do Hub com F12 → inspetor):
 
 ```json
