@@ -52,7 +52,7 @@ Nos modos em tempo real e ao recarregar o cache (`R` no visualizador offline), s
 
 ## Integração Hub / relatório CCO
 
-O payload segue o front `relatorioCco.js`: `number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence` (quando preenchido), e `updates` como objetos com **`updateDate`**, **`updateHour`** e **`text`**. No terminal, a ocorrência opcional continua a preencher `ocorrencia` e `occurrence` no JSON.
+O payload segue o front **`relatorioCco.js`**: campos com atributo **`data-field`** (`number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence`), `updates` com **`updateDate`**, **`updateHour`**, **`text`**, e **PUT** em `/api/relatorio/tickets/{id}`. A UI do Hub limita a **4** linhas de atualização por ticket (`maxUpdates: 4`); o Menu-OTRS pode enviar mais notas na API, mas o formulário só mostra quatro.
 
 Antes do envio, o script gera um arquivo HTML temporário com o mesmo conteúdo e abre o navegador para **validação visual** pelo operador; o envio só ocorre após confirmação no terminal.
 
@@ -70,8 +70,8 @@ Exemplo de `HubFormSelectors` (inspecione o DOM do Hub com F12 → inspetor):
 
 ```json
 "HubFormSelectors": {
-  "number": ["#meuCampoNumero"],
-  "client": ["textarea[name=\"client\"]"]
+  "number": ["[data-field=\"number\"]"],
+  "occurrence": ["textarea[data-field=\"occurrence\"]"]
 }
 ```
 

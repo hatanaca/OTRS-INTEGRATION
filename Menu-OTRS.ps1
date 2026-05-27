@@ -2180,6 +2180,7 @@ function Export-HubRelatorioAutofillHelperHtml {
   "use strict";
   var payload = JSON.parse(new TextDecoder("utf-8").decode(Uint8Array.from(atob("B64TOKEN"), function(c){ return c.charCodeAt(0); })));
   var selO = SELTOKEN;
+  var UI_MAX_UPDATES = 4;
   function selList(key) {
     var o = selO[key];
     var def = (DEFAULT_SEL[key] || []).slice();
@@ -2188,12 +2189,12 @@ function Export-HubRelatorioAutofillHelperHtml {
     return def;
   }
   var DEFAULT_SEL = {
-    number: ["input[name=\"number\"]","#number","input#number","[data-field=\"number\"]"],
-    status: ["input[name=\"status\"]","select[name=\"status\"]","#status","[data-field=\"status\"]"],
-    openingDate: ["input[name=\"openingDate\"]","#openingDate","[data-field=\"openingDate\"]"],
-    openingHour: ["input[name=\"openingHour\"]","#openingHour","[data-field=\"openingHour\"]"],
-    client: ["textarea[name=\"client\"]","input[name=\"client\"]","#client","[data-field=\"client\"]"],
-    occurrence: ["textarea[name=\"occurrence\"]","textarea[name=\"ocorrencia\"]","#occurrence","#ocorrencia","[data-field=\"occurrence\"]"]
+    number: ["[data-field=\"number\"]","input[name=\"number\"]","#number"],
+    status: ["[data-field=\"status\"]","select[name=\"status\"]","select.ticket-status","#status"],
+    openingDate: ["[data-field=\"openingDate\"]","input.opening-date","input[name=\"openingDate\"]"],
+    openingHour: ["[data-field=\"openingHour\"]","input.opening-hour","input[name=\"openingHour\"]"],
+    client: ["[data-field=\"client\"]","textarea[name=\"client\"]","#client"],
+    occurrence: ["[data-field=\"occurrence\"]","textarea[name=\"occurrence\"]","#occurrence"]
   };
   function setNativeValue(el, value) {
     if (!el || value === undefined || value === null) return false;
@@ -2211,11 +2212,12 @@ function Export-HubRelatorioAutofillHelperHtml {
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return true;
   }
-  function tryFill(key, value) {
+  function tryFillInForm(form, key, value) {
+    if (!form) return false;
     var arr = selList(key);
     for (var i = 0; i < arr.length; i++) {
       try {
-        var el = document.querySelector(arr[i]);
+        var el = form.querySelector(arr[i]);
         if (el) {
           setNativeValue(el, value);
           console.log("[Menu-OTRS] Campo \"" + key + "\" via " + arr[i]);
@@ -2223,51 +2225,64 @@ function Export-HubRelatorioAutofillHelperHtml {
         }
       } catch (e) { console.warn(e); }
     }
-    console.warn("[Menu-OTRS] Campo nao encontrado: " + key);
+    console.warn("[Menu-OTRS] Campo nao encontrado no formulario: " + key);
     return false;
   }
-  tryFill("number", payload.number || "");
-  tryFill("status", payload.status || "");
-  tryFill("openingDate", payload.openingDate || "");
-  tryFill("openingHour", payload.openingHour || "");
-  tryFill("client", payload.client || "");
-  var occ = (payload.occurrence || payload.ocorrencia || "");
-  if (occ) tryFill("occurrence", occ);
-  var updates = payload.updates || [];
-  var tables = document.querySelectorAll("table");
-  var best = null;
-  for (var ti = 0; ti < tables.length; ti++) {
-    var trs = tables[ti].querySelectorAll("tbody tr");
-    if (trs.length >= updates.length && updates.length > 0) { best = trs; break; }
+  function findTargetTicketForm() {
+    var forms = document.querySelectorAll("#ticketsContainer .ticket-form, .ticket-form");
+    if (!forms || !forms.length) return null;
+    var want = String(payload.number || "").trim();
+    var i;
+    for (i = 0; i < forms.length; i++) {
+      var nf = forms[i].querySelector("[data-field=\"number\"]");
+      if (nf && String(nf.value || "").trim() === want && want) return forms[i];
+    }
+    for (i = 0; i < forms.length; i++) {
+      var nf2 = forms[i].querySelector("[data-field=\"number\"]");
+      if (nf2 && !String(nf2.value || "").trim()) return forms[i];
+    }
+    return forms[forms.length - 1];
   }
-  if (!best && tables.length) {
-    var last = tables[tables.length - 1];
-    best = last.querySelectorAll("tbody tr");
-  }
-  if (best && best.length && updates.length) {
-    for (var r = 0; r < updates.length && r < best.length; r++) {
-      var row = best[r];
-      var fields = row.querySelectorAll("input, textarea");
+  function fillUpdatesRelatorio(form, updates) {
+    if (!form || !updates || !updates.length) return;
+    var entries = form.querySelectorAll(".updates-container .update-entry");
+    if (!entries || !entries.length) {
+      console.warn("[Menu-OTRS] Nenhum .update-entry no formulario (relatorioCco.js).");
+      return;
+    }
+    var n = Math.min(entries.length, updates.length, UI_MAX_UPDATES);
+    if (updates.length > UI_MAX_UPDATES) {
+      console.warn("[Menu-OTRS] Hub mostra no maximo " + UI_MAX_UPDATES + " atualizacoes; preenchendo as " + n + " primeiras linhas.");
+    }
+    for (var r = 0; r < n; r++) {
+      var row = entries[r];
       var u = updates[r];
       var ud = u.updateDate || u.date || "";
       var uh = u.updateHour || u.hour || "";
       var tx = u.text || "";
-      if (fields.length >= 3) {
-        setNativeValue(fields[0], ud);
-        setNativeValue(fields[1], uh);
-        setNativeValue(fields[2], tx);
-        console.log("[Menu-OTRS] Linha atualizacao " + (r + 1));
-      } else if (fields.length === 2) {
-        setNativeValue(fields[0], ud);
-        setNativeValue(fields[1], tx);
-      } else if (fields.length === 1) {
-        setNativeValue(fields[0], tx);
-      }
+      var dEl = row.querySelector(".update-date");
+      var hEl = row.querySelector(".update-hour");
+      var tEl = row.querySelector(".update-text");
+      if (dEl) setNativeValue(dEl, ud);
+      if (hEl) setNativeValue(hEl, uh);
+      if (tEl) setNativeValue(tEl, tx);
+      console.log("[Menu-OTRS] Atualizacao " + (r + 1));
     }
-  } else {
-    console.warn("[Menu-OTRS] Tabela de atualizacoes nao casou; verifique HubFormSelectors no config.json.");
   }
-  console.log("[Menu-OTRS] Preenchimento concluido. Revise os campos e grave no Hub.");
+  var form = findTargetTicketForm();
+  if (!form) {
+    console.warn("[Menu-OTRS] Nenhum .ticket-form encontrado. Abra o Gerador CCO carregado.");
+    return;
+  }
+  tryFillInForm(form, "number", payload.number || "");
+  tryFillInForm(form, "status", payload.status || "");
+  tryFillInForm(form, "openingDate", payload.openingDate || "");
+  tryFillInForm(form, "openingHour", payload.openingHour || "");
+  tryFillInForm(form, "client", payload.client || "");
+  var occ = (payload.occurrence || payload.ocorrencia || "");
+  if (occ) tryFillInForm(form, "occurrence", occ);
+  fillUpdatesRelatorio(form, payload.updates || []);
+  console.log("[Menu-OTRS] Preenchimento concluido (alinhado a relatorioCco.js). Revise e deixe o Hub gravar (debounce).");
 })();
 '@
     $jsCore = $jsCore.Replace('B64TOKEN', $b64).Replace('SELTOKEN', $selLiteral)
@@ -2301,7 +2316,7 @@ button{margin-top:.75rem;padding:.55rem 1rem;border-radius:6px;border:none;backg
 <li>Aqui em baixo: <strong>Copiar script</strong>, volte ao Hub, <strong>Cole</strong> na consola e <strong>Enter</strong>.</li>
 <li>Confira os campos e use o botao de gravar / fluxo normal do Hub.</li>
 </ol>
-<p class="warn">Se algum campo nao mudar (React), ajuste os selectores em <code>HubFormSelectors</code> no <code>config.json</code> (menu 5) — ver README.</p>
+<p class="warn">Alinhado ao <code>relatorioCco.js</code> do Hub: campos <code>[data-field]</code>, atualizacoes em <code>.update-entry</code> (max. 4 na UI). Ajuste <code>HubFormSelectors</code> se o HTML mudar.</p>
 <p><a class="btn" href="$hubEsc" target="_blank" rel="noopener">Abrir Gerador CCO no Hub</a></p>
 <div class="box">
 <label for="sn"><strong>Script para colar na consola do Hub</strong></label>
@@ -2406,17 +2421,36 @@ function Invoke-HubRelatorioSeleniumFill {
 
         Enter-SeUrl -Url $HubPageUrl -Driver $Driver
 
-        function Get-SeFieldByName {
-            param([string]$FieldName, [int]$TimeoutSec = 30)
+        function Wait-HubTicketForms {
+            param([int]$TimeoutSec = 50)
             $deadline = (Get-Date).AddSeconds($TimeoutSec)
             while ((Get-Date) -lt $deadline) {
                 try {
-                    $el = Find-SeElement -Driver $Driver -Wait -Timeout 2 -Name $FieldName -ErrorAction SilentlyContinue
-                    if ($el) { return $el }
+                    $list = $Driver.FindElements([OpenQA.Selenium.By]::CssSelector('.ticket-form'))
+                    if ($list -and $list.Count -gt 0) { return $list }
                 } catch { }
-                Start-Sleep -Milliseconds 400
+                Start-Sleep -Milliseconds 500
             }
             return $null
+        }
+
+        function Get-HubTargetTicketForm {
+            param($FormList, $Payload)
+            if (-not $FormList -or $FormList.Count -eq 0) { return $null }
+            $want = ([string]$Payload.number).Trim()
+            foreach ($f in $FormList) {
+                try {
+                    $inp = $f.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="number"]'))
+                    if ($inp -and ($inp.GetAttribute('value') -as [string]).Trim() -eq $want -and $want.Length -gt 0) { return $f }
+                } catch { }
+            }
+            foreach ($f in $FormList) {
+                try {
+                    $inp = $f.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="number"]'))
+                    if ($inp -and [string]::IsNullOrWhiteSpace(($inp.GetAttribute('value') -as [string]))) { return $f }
+                } catch { }
+            }
+            return $FormList[$FormList.Count - 1]
         }
 
         function Set-SeFieldValue {
@@ -2426,67 +2460,71 @@ function Invoke-HubRelatorioSeleniumFill {
             Send-SeKeys -Element $Element -Keys $Text
         }
 
-        $elNum = Get-SeFieldByName 'number'
-        Set-SeFieldValue $elNum ([string]$Payload.number)
+        function Set-HubDataField {
+            param($Form, [string]$Field, [string]$Text)
+            if (-not $Form) { return }
+            try {
+                $el = $Form.FindElement([OpenQA.Selenium.By]::CssSelector('[data-field="' + $Field + '"]'))
+                Set-SeFieldValue $el $Text
+            } catch { }
+        }
 
-        $elSt = Get-SeFieldByName 'status'
-        if ($elSt) { Set-SeFieldValue $elSt ([string]$Payload.status) }
+        $forms = Wait-HubTicketForms
+        if (-not $forms -or $forms.Count -eq 0) {
+            throw "Nao foi encontrado .ticket-form no Gerador (aguarde o carregamento ou faca login)."
+        }
+        $form = Get-HubTargetTicketForm $forms $Payload
+        if (-not $form) { throw "Nao foi possivel escolher o formulario do ticket." }
 
-        $elOd = Get-SeFieldByName 'openingDate'
-        if ($elOd) { Set-SeFieldValue $elOd ([string]$Payload.openingDate) }
-
-        $elOh = Get-SeFieldByName 'openingHour'
-        if ($elOh) { Set-SeFieldValue $elOh ([string]$Payload.openingHour) }
-
-        $elCl = Get-SeFieldByName 'client'
-        if ($elCl) { Set-SeFieldValue $elCl ([string]$Payload.client) }
-
+        Set-HubDataField $form 'number' ([string]$Payload.number)
+        Set-HubDataField $form 'status' ([string]$Payload.status)
+        Set-HubDataField $form 'openingDate' ([string]$Payload.openingDate)
+        Set-HubDataField $form 'openingHour' ([string]$Payload.openingHour)
+        Set-HubDataField $form 'client' ([string]$Payload.client)
         if ($Payload.occurrence -or $Payload.ocorrencia) {
             $occ = if ($Payload.occurrence) { [string]$Payload.occurrence } else { [string]$Payload.ocorrencia }
-            $elOc = Get-SeFieldByName 'occurrence'
-            if (-not $elOc) { $elOc = Get-SeFieldByName 'ocorrencia' }
-            if ($elOc) { Set-SeFieldValue $elOc $occ }
+            Set-HubDataField $form 'occurrence' $occ
         }
 
         $updates = @($Payload.updates)
+        $uiMaxUpdates = 4
         if ($updates.Count -gt 0) {
             try {
-                $rows = $Driver.FindElements([OpenQA.Selenium.By]::CssSelector('table tbody tr'))
+                $entries = $form.FindElements([OpenQA.Selenium.By]::CssSelector('.updates-container .update-entry'))
             } catch {
-                $rows = @()
+                $entries = $null
             }
-            if ($rows -and $rows.Count -gt 0) {
-                $max = [Math]::Min($updates.Count, $rows.Count)
-                for ($ri = 0; $ri -lt $max; $ri++) {
-                    $row = $rows[$ri]
-                    try {
-                        $fields = $row.FindElements([OpenQA.Selenium.By]::CssSelector('input, textarea'))
-                    } catch { $fields = @() }
-                    if (-not $fields -or $fields.Count -eq 0) { continue }
+            if ($entries -and $entries.Count -gt 0) {
+                $n = [Math]::Min([Math]::Min($entries.Count, $updates.Count), $uiMaxUpdates)
+                if ($updates.Count -gt $uiMaxUpdates) {
+                    Write-Info ("Selenium: o Hub (relatorioCco.js) mostra no maximo " + $uiMaxUpdates + " atualizacoes; a preencher " + $n.ToString() + " linha(s).")
+                }
+                for ($ri = 0; $ri -lt $n; $ri++) {
+                    $row = $entries[$ri]
                     $u = $updates[$ri]
-                    $ud = ''
-                    $uh = ''
-                    $tx = ''
+                    $ud = '' ; $uh = '' ; $tx = ''
                     if ($null -ne $u.updateDate) { $ud = [string]$u.updateDate } elseif ($null -ne $u.date) { $ud = [string]$u.date }
                     if ($null -ne $u.updateHour) { $uh = [string]$u.updateHour } elseif ($null -ne $u.hour) { $uh = [string]$u.hour }
                     if ($null -ne $u.text) { $tx = [string]$u.text }
-                    if ($fields.Count -ge 3) {
-                        Set-SeFieldValue $fields[0] $ud
-                        Set-SeFieldValue $fields[1] $uh
-                        Set-SeFieldValue $fields[2] $tx
-                    } elseif ($fields.Count -eq 2) {
-                        Set-SeFieldValue $fields[0] $ud
-                        Set-SeFieldValue $fields[1] $tx
-                    } elseif ($fields.Count -eq 1) {
-                        Set-SeFieldValue $fields[0] $tx
-                    }
+                    try {
+                        $dEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-date'))
+                        Set-SeFieldValue $dEl $ud
+                    } catch { }
+                    try {
+                        $hEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-hour'))
+                        Set-SeFieldValue $hEl $uh
+                    } catch { }
+                    try {
+                        $tEl = $row.FindElement([OpenQA.Selenium.By]::CssSelector('.update-text'))
+                        Set-SeFieldValue $tEl $tx
+                    } catch { }
                 }
             } else {
-                Write-Info "Selenium: tabela de atualizacoes nao encontrada (CSS table tbody tr); campos principais preenchidos."
+                Write-Info "Selenium: nao ha .updates-container .update-entry no formulario alvo."
             }
         }
 
-        Write-OK "Selenium: formulario preenchido na janela do WebDriver. Faca login no Hub se necessario e grave na UI."
+        Write-OK "Selenium: campos preenchidos (data-field / relatorioCco.js). Faca login se necessario; o Hub grava com debounce ao alterar campos."
     } catch {
         Write-Warn ("Selenium: " + $_)
     } finally {
