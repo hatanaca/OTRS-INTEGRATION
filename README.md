@@ -27,7 +27,8 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubPostTicketPaths` | (Opcional) Caminhos POST para criar ticket, separados por `;` ou `,`. Vazio = ordem automática: **`api/relatorio/tickets`** primeiro, depois `…/ticket`, prefixo raiz e outras rotas. |
 | `HubPutTicketPaths` | (Opcional) Caminhos PUT; use `{numero}` para o número OTRS. Vazio = tenta `…/tickets/{numero}`, `…/{numero}`, `…/ticket/{numero}`, etc. |
 | `HubFormSelectors` | (Opcional) Objeto JSON: por campo (`number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence`) uma lista de selectores CSS a tentar **antes** dos padroes, ao usar a pagina «Preencher Hub» (script na consola). |
-| `HubWebDriverEnabled` | Se `true`, na opção **7** (após abrir os HTML) pergunta se deve abrir **Selenium WebDriver** e preencher o Gerador CCO numa nova janela de browser. Requer `Install-Module Selenium`. |
+| `HubWebDriverEnabled` | Se `true`, na opção **7** (após abrir os HTML) pode abrir **Selenium WebDriver** e preencher o Gerador CCO numa nova janela de browser. Requer o módulo Selenium (Gallery, `tools\Selenium\` ou `HubSeleniumModulePath`; ver `tools/Selenium/README.md`). |
+| `HubWebDriverAutoFill` | Se `true` (e `HubWebDriverEnabled`), na opção **7** o WebDriver inicia e preenche **sem** a pergunta intermédia `s/N`. Útil para fluxos automatizados; o login no Hub pode continuar a ser manual na janela do driver. |
 | `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |
 | `HubSeleniumModulePath` | (Opcional) Caminho para `Selenium.psd1` ou para a pasta do módulo Selenium **copiada** (sem `Install-Module`). Vazio = usa `tools\Selenium\` junto ao `Menu-OTRS.ps1` ou o módulo na Gallery. |
 
@@ -44,7 +45,7 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
-7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets` para a lista; **POST**/`PUT` nos caminhos configurados. HTML de pré-visualização + guia para consola; com **`HubWebDriverEnabled`** pergunta se abre **Selenium** para preencher o Gerador. Após `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`).
+7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets` para a lista; **POST**/`PUT` nos caminhos configurados. HTML de pré-visualização + guia para consola; com **`HubWebDriverEnabled`** pergunta se abre **Selenium** para preencher o Gerador (ou inicia sozinho se **`HubWebDriverAutoFill`** for `true`). Após `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`).
 
 ### Normalização (avisos ao operador)
 
@@ -64,7 +65,7 @@ Na opção **7**, além do HTML de pré-visualização, abre-se uma segunda pág
 
 Alternativa sem consola: use apenas a **API** (confirmação no terminal); os tickets passam a existir no servidor e o Gerador costuma **listá-los** após recarregar ou conforme o `relatorioCco.js` sincroniza.
 
-Para **automação nativa** no formulário: **`HubWebDriverEnabled`**, Selenium via **Gallery**, pasta **`tools\Selenium\`** ou **`HubSeleniumModulePath`** (sem admin — ver **`tools/Selenium/README.md`**). A opção mais leve continua a ser o **script na consola** (página «Preencher Hub»). Alternativa: alterar o Hub para rascunho por URL/API.
+Para **automação nativa** no formulário: **`HubWebDriverEnabled`**, opcionalmente **`HubWebDriverAutoFill`** para não perguntar `s/N`, Selenium via **Gallery**, pasta **`tools\Selenium\`** ou **`HubSeleniumModulePath`** (sem admin — ver **`tools/Selenium/README.md`**). A opção mais leve continua a ser o **script na consola** (página «Preencher Hub»). Alternativa: alterar o Hub para rascunho por URL/API.
 
 Exemplo de `HubFormSelectors` (inspecione o DOM do Hub com F12 → inspetor):
 

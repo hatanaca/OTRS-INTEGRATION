@@ -43,6 +43,6 @@ Menos habitual para formulários web complexos: extensão que recebe JSON (mensa
 
 No `config.json` defina **`HubWebDriverEnabled`** como `true` e **`HubWebDriverBrowser`** como `Chrome` ou `Edge`. O Selenium pode vir da **Gallery** (`Install-Module Selenium -Scope CurrentUser`), de uma pasta **`tools\Selenium\`** ao lado do script, ou de **`HubSeleniumModulePath`** — ver **`tools/Selenium/README.md`** se não puder instalar módulos.
 
-Sem alterar o `config.json`, o fluxo Selenium **não** é oferecido (apenas HTML + API).
+Com **`HubWebDriverAutoFill`** a `true`, na sincronização (opção **7**) o script abre o WebDriver e preenche o Gerador **sem** perguntar `s/N` após os HTML; caso contrário o operador confirma no terminal.
 
-Sem alterar o `config.json`, pode usar o exemplo em **`scripts/Exemplo-HubRelatorio-Selenium.ps1`** (payload num ficheiro JSON).
+Sem **`HubWebDriverEnabled`** no `config.json`, o Menu-OTRS não oferece Selenium na opção **7** (apenas HTML + API). Para experimentar WebDriver fora do menu, use **`scripts/Exemplo-HubRelatorio-Selenium.ps1`** com um payload JSON.

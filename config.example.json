@@ -14,6 +14,7 @@
   "HubPutTicketPaths": "",
   "HubFormSelectors": null,
   "HubWebDriverEnabled": false,
+  "HubWebDriverAutoFill": false,
   "HubWebDriverBrowser": "Chrome",
   "HubSeleniumModulePath": ""
 }

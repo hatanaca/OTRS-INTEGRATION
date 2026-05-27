@@ -126,6 +126,7 @@ function Load-Config {
         HubPutTicketPaths    = ''
         HubFormSelectors     = $null
         HubWebDriverEnabled  = $false
+        HubWebDriverAutoFill = $false
         HubWebDriverBrowser  = 'Chrome'
         HubSeleniumModulePath = ''
     }
@@ -154,6 +155,12 @@ function Load-Config {
                 if ($v -is [bool]) { $cfg.HubWebDriverEnabled = $v }
                 elseif ($v -is [string]) { $cfg.HubWebDriverEnabled = $v.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
                 else { $cfg.HubWebDriverEnabled = [bool]$v }
+            }
+            if ($propNames -contains 'HubWebDriverAutoFill') {
+                $v2 = $j.HubWebDriverAutoFill
+                if ($v2 -is [bool]) { $cfg.HubWebDriverAutoFill = $v2 }
+                elseif ($v2 -is [string]) { $cfg.HubWebDriverAutoFill = $v2.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
+                else { $cfg.HubWebDriverAutoFill = [bool]$v2 }
             }
             if ($propNames -contains 'HubWebDriverBrowser') {
                 $cfg.HubWebDriverBrowser = [string]$j.HubWebDriverBrowser
@@ -184,6 +191,7 @@ function Save-Config {
         HubPutTicketPaths   = $Cfg.HubPutTicketPaths
         HubFormSelectors    = $Cfg.HubFormSelectors
         HubWebDriverEnabled = $Cfg.HubWebDriverEnabled
+        HubWebDriverAutoFill = $Cfg.HubWebDriverAutoFill
         HubWebDriverBrowser = $Cfg.HubWebDriverBrowser
         HubSeleniumModulePath = $Cfg.HubSeleniumModulePath
     } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
@@ -2553,10 +2561,18 @@ function Invoke-HubMaybeSeleniumFormFill {
         Write-Warn "HubWebDriverEnabled=true mas o Selenium nao foi encontrado. Copie o modulo para tools\Selenium\ ou defina HubSeleniumModulePath no config.json (ver tools\Selenium\README.md)."
         return
     }
-    Write-Host ""
-    Write-Host "  Preencher o Gerador CCO via Selenium (nova janela de browser)? [s/N]: " -ForegroundColor Yellow -NoNewline
-    $a = Read-Host
-    if ($a -notmatch '^[Ss]') { return }
+    $runNow = $false
+    if ($Cfg.HubWebDriverAutoFill -eq $true) {
+        $runNow = $true
+        Write-Host ""
+        Write-Info "Selenium: a iniciar preenchimento automatico do Gerador (HubWebDriverAutoFill=true)..."
+    } else {
+        Write-Host ""
+        Write-Host "  Preencher o Gerador CCO via Selenium (nova janela de browser)? [s/N]: " -ForegroundColor Yellow -NoNewline
+        $a = Read-Host
+        if ($a -match '^[Ss]') { $runNow = $true }
+    }
+    if (-not $runNow) { return }
     $page = Get-HubEncaminharUri $HubUrl $EncPathRel
     $br = if ($Cfg.HubWebDriverBrowser -and $Cfg.HubWebDriverBrowser.ToString().Trim()) {
         $Cfg.HubWebDriverBrowser.ToString().Trim()
@@ -2585,7 +2601,7 @@ function Invoke-SyncHub {
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
     Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, HTML de revisao + guia consola; opcionalmente Selenium (WebDriver) para preencher o Gerador; depois confirmacao e API."
-    Write-Info "Com HubWebDriverEnabled=true e Selenium disponivel (Gallery, tools\Selenium ou HubSeleniumModulePath), pode abrir-se o WebDriver no Gerador CCO."
+    Write-Info "Com HubWebDriverEnabled=true e Selenium disponivel, o Gerador pode ser preenchido pelo WebDriver (pergunta s/N ou HubWebDriverAutoFill=true)."
     Write-Info "A sincronizacao por API (GET/POST/PUT em .../tickets) grava no servidor; depois pode abrir o Hub na rota configurada (padrao api/relatorio)."
     Write-Host ""
 
@@ -2826,6 +2842,13 @@ function Show-Configuracoes {
     $wdDef = if ($Cfg.HubWebDriverEnabled) { 's' } else { 'n' }
     $wdIn = Read-Field "Hub: oferecer preenchimento via Selenium WebDriver na sync (s/N)" $wdDef
     $Cfg.HubWebDriverEnabled = ($wdIn -match '^[Ss]')
+    if ($Cfg.HubWebDriverEnabled) {
+        $afDef = if ($Cfg.HubWebDriverAutoFill) { 's' } else { 'n' }
+        $afIn = Read-Field "Hub: Selenium inicia sozinho apos abrir o HTML (sem pergunta s/N) (s/N)" $afDef
+        $Cfg.HubWebDriverAutoFill = ($afIn -match '^[Ss]')
+    } else {
+        $Cfg.HubWebDriverAutoFill = $false
+    }
     $Cfg.HubWebDriverBrowser = Read-Field "Hub WebDriver: browser (Chrome ou Edge)" ([string]$Cfg.HubWebDriverBrowser)
     if (-not ($Cfg.HubWebDriverBrowser -as [string]).Trim()) { $Cfg.HubWebDriverBrowser = 'Chrome' }
     $Cfg.HubSeleniumModulePath = Read-Field "Hub: caminho Selenium.psd1 ou pasta do modulo (vazio = Gallery ou tools\Selenium)" ([string]$Cfg.HubSeleniumModulePath)
