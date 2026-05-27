@@ -103,13 +103,14 @@ function Pause-Screen {
 function Load-Config {
     param([string]$Path)
     $cfg = @{
-        BaseURL     = 'http://172.16.0.12/znuny'
-        Username    = ''
-        Password    = ''
-        EstadoFile  = 'estado_chamados.json'
-        OutputPath  = $PWD.Path
-        SearchPath  = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
-        HubBaseURL  = 'http://172.16.0.49:3210'
+        BaseURL            = 'http://172.16.0.12/znuny'
+        Username           = ''
+        Password           = ''
+        EstadoFile         = 'estado_chamados.json'
+        OutputPath         = $PWD.Path
+        SearchPath         = 'index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8'
+        HubBaseURL         = 'http://172.16.0.49:3210'
+        HubEncaminharPath  = 'home'
     }
     if (Test-Path $Path) {
         try {
@@ -120,7 +121,8 @@ function Load-Config {
             if ($j.EstadoFile)  { $cfg.EstadoFile  = $j.EstadoFile  }
             if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
             if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
-            if ($j.HubBaseURL)  { $cfg.HubBaseURL  = $j.HubBaseURL  }
+            if ($j.HubBaseURL)        { $cfg.HubBaseURL        = $j.HubBaseURL        }
+            if ($j.HubEncaminharPath) { $cfg.HubEncaminharPath = $j.HubEncaminharPath }
         } catch { }
     }
     return $cfg
@@ -135,7 +137,8 @@ function Save-Config {
         EstadoFile  = $Cfg.EstadoFile
         OutputPath  = $Cfg.OutputPath
         SearchPath  = $Cfg.SearchPath
-        HubBaseURL  = $Cfg.HubBaseURL
+        HubBaseURL        = $Cfg.HubBaseURL
+        HubEncaminharPath = $Cfg.HubEncaminharPath
     } | ConvertTo-Json | Out-File $Path -Encoding UTF8
 }
 
@@ -1494,7 +1497,7 @@ function Hub-Put {
 }
 
 function Build-HubTicket {
-    param($Ticket, [int]$MaxUpdates = 10)
+    param($Ticket, [int]$MaxUpdates = 10, [string]$Ocorrencia = '')
 
     $openDate = "" ; $openHour = ""
     if ($Ticket.Criado -match '(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2})') {
@@ -1515,9 +1518,9 @@ function Build-HubTicket {
         $updates.Add([ordered]@{ date=$uDate; hour=$uHour; text=$n.Text })
     }
 
-    # Campos alinhados ao formulario do Hub (relatorio CCO). O campo "ocorrencia" nao e enviado
-    # para o operador preencher manualmente no navegador.
-    return [ordered]@{
+    # Campos alinhados ao formulario do Hub (relatorio CCO). O campo "ocorrencia" e opcional
+    # (informado no terminal na sincronizacao e incluido no JSON se preenchido).
+    $h = [ordered]@{
         number      = $Ticket.Numero
         status      = $Ticket.Estado
         openingDate = $openDate
@@ -1525,11 +1528,17 @@ function Build-HubTicket {
         client      = $Ticket.Cliente
         updates     = @($updates)
     }
+    $occTrim = ($Ocorrencia -as [string]).Trim()
+    if ($occTrim.Length -gt 0) { $h.ocorrencia = $occTrim }
+    return $h
 }
 
 function Test-HubRelatorioChanged {
     param($hubTicket, $payload)
     if (-not $hubTicket) { return $true }
+    if ($payload.Keys -contains 'ocorrencia') {
+        if (($hubTicket.ocorrencia -or '') -ne ($payload.ocorrencia -or '')) { return $true }
+    }
     if (($hubTicket.status -or '') -ne ($payload.status -or '')) { return $true }
     if (($hubTicket.openingDate -or '') -ne ($payload.openingDate -or '')) { return $true }
     if (($hubTicket.openingHour -or '') -ne ($payload.openingHour -or '')) { return $true }
@@ -1557,6 +1566,142 @@ function Show-HubTicketPreview {
     Write-Host ($Payload.openingDate + " " + $Payload.openingHour) -ForegroundColor White
     Write-Host "  Atualizac: " -ForegroundColor DarkGray -NoNewline
     Write-Host ($Payload.updates.Count.ToString() + " notas") -ForegroundColor White
+    if ($Payload.ocorrencia) {
+        $oc = [string]$Payload.ocorrencia
+        if ($oc.Length -gt 160) { $oc = $oc.Substring(0, 157) + "..." }
+        Write-Host "  Ocorren. : " -ForegroundColor DarkGray -NoNewline
+        Write-Host $oc -ForegroundColor White
+    }
+}
+
+function Read-OcorrenciaMultiline {
+    Write-Host ""
+    Write-Host "  Ocorrencia (opcional, como no formulario do Hub)." -ForegroundColor DarkGray
+    Write-Host "  Linha vazia encerra o texto; apenas Enter = sem ocorrencia." -ForegroundColor DarkGray
+    Write-Host ""
+    $lines = New-Object System.Collections.Generic.List[string]
+    while ($true) {
+        Write-Host "  > " -ForegroundColor DarkGray -NoNewline
+        $line = Read-Host
+        if ($line -eq '' -and $lines.Count -eq 0) { return '' }
+        if ($line -eq '') { return ($lines -join "`n") }
+        $lines.Add($line)
+    }
+}
+
+function Get-HubEncaminharUri {
+    param([string]$HubUrl, [string]$RelativePath)
+    $p = if ($RelativePath) { $RelativePath.Trim().TrimStart('/') } else { 'home' }
+    if (-not $p) { $p = 'home' }
+    return ($HubUrl.TrimEnd('/') + '/' + $p)
+}
+
+function Export-HubRelatorioFormHtml {
+    param($Payload, [string]$HubBaseUrl, [string]$OutPath)
+
+    function HtmlEsc([string]$t) {
+        if ($null -eq $t) { return '' }
+        return [System.Net.WebUtility]::HtmlEncode([string]$t)
+    }
+
+    $num   = HtmlEsc ([string]$Payload.number)
+    $cli   = HtmlEsc ([string]$Payload.client)
+    $st    = HtmlEsc ([string]$Payload.status)
+    $od    = HtmlEsc ([string]$Payload.openingDate)
+    $oh    = HtmlEsc ([string]$Payload.openingHour)
+    $hubL  = HtmlEsc ($HubBaseUrl.TrimEnd('/'))
+
+    $sbRows = New-Object System.Text.StringBuilder
+    $ix = 0
+    foreach ($u in @($Payload.updates)) {
+        $ix++
+        $ud = HtmlEsc ([string]$u.date)
+        $uh = HtmlEsc ([string]$u.hour)
+        $ut = HtmlEsc ([string]$u.text)
+        $ut = ($ut -replace "`r`n", '<br/>') -replace "`n", '<br/>'
+        [void]$sbRows.Append('<tr><td>').Append($ix).Append('</td><td>').Append($ud).Append(' ')
+        [void]$sbRows.Append($uh).Append('</td><td class="note">').Append($ut).Append('</td></tr>')
+    }
+
+    if ($Payload.ocorrencia) {
+        $occBody = (HtmlEsc ([string]$Payload.ocorrencia)) -replace "`r`n", '<br/>' -replace "`n", '<br/>'
+    } else {
+        $occBody = '<span class="muted">(vazio neste envio)</span>'
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Relatorio CCO #$num</title>
+<style>
+body{font-family:Segoe UI,Tahoma,sans-serif;margin:1.25rem;background:#f4f6f8;color:#222;}
+h1{font-size:1.15rem;margin:0 0 .5rem;}
+.box{background:#fff;border:1px solid #ccd2d8;border-radius:6px;padding:1rem;margin:.75rem 0;max-width:52rem;}
+table{border-collapse:collapse;width:100%;font-size:.88rem;}
+th,td{border:1px solid #e2e6ea;padding:.4rem .5rem;vertical-align:top;}
+th{background:#eef2f6;text-align:left;}
+td.note{white-space:pre-wrap;}
+.muted{color:#666;}
+.hint{font-size:.85rem;color:#444;margin:.5rem 0 1rem;}
+kbd{background:#eee;padding:.1rem .35rem;border-radius:3px;}
+a{color:#0b5;}
+</style>
+</head>
+<body>
+<h1>Pre-visualizacao — Relatorio CCO (Hub)</h1>
+<p class="hint">Revise os campos abaixo (espelho do que sera enviado pela API). Depois volte ao <kbd>Menu-OTRS</kbd> e confirme o envio. Hub: <a href="$hubL">$hubL</a></p>
+<div class="box">
+<table>
+<tr><th>Ticket</th><td>#$num</td></tr>
+<tr><th>Cliente</th><td>$cli</td></tr>
+<tr><th>Estado</th><td>$st</td></tr>
+<tr><th>Abertura</th><td>$od $oh</td></tr>
+</table>
+</div>
+<div class="box">
+<h2 style="font-size:1rem;margin-top:0;">Ocorrencia</h2>
+<div class="note">$occBody</div>
+</div>
+<div class="box">
+<h2 style="font-size:1rem;margin-top:0;">Atualizacoes</h2>
+<table><thead><tr><th>#</th><th>Data</th><th>Nota</th></tr></thead>
+<tbody>
+$($sbRows.ToString())
+</tbody></table>
+</div>
+</body>
+</html>
+"@
+    $dir = [System.IO.Path]::GetDirectoryName($OutPath)
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $html | Out-File -LiteralPath $OutPath -Encoding utf8
+}
+
+function Show-HubRelatorioFormHtml {
+    param($Payload, [string]$HubUrl)
+    $fn = 'HubRelatorio_' + [string]$Payload.number + '_' + (Get-Date -Format 'yyyyMMddHHmmss') + '.html'
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) $fn
+    Export-HubRelatorioFormHtml -Payload $Payload -HubBaseUrl $HubUrl -OutPath $path
+    Start-Process -FilePath $path
+}
+
+function Invoke-HubPerguntaAbrirEncaminhar {
+    param([string]$HubUrl, [string]$EncaminharPath)
+    Write-Host "  Abrir Hub no navegador para encaminhar o relatorio? [S/n]: " -ForegroundColor Yellow -NoNewline
+    $r2 = Read-Host
+    if ($r2 -eq '' -or $r2 -match '^[Ss]') {
+        try {
+            $u = Get-HubEncaminharUri $HubUrl $EncaminharPath
+            Start-Process -FilePath $u
+        } catch {
+            Write-Warn ("Nao foi possivel abrir o navegador: " + $_)
+        }
+    }
 }
 
 function Invoke-SyncHub {
@@ -1565,7 +1710,8 @@ function Invoke-SyncHub {
     Write-Banner
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
-    Write-Info "O campo Ocorrencia do Hub nao e alterado por esta sincronizacao (preenchimento manual)."
+    Write-Info "Fluxo: resumo no terminal, Ocorrencia opcional, formulario HTML no navegador, confirmacao e envio (API)."
+    Write-Info "Apos cada envio bem-sucedido, podera abrir o Hub para o passo de encaminhamento na interface web."
     Write-Host ""
 
     # Credenciais do Hub
@@ -1575,6 +1721,9 @@ function Invoke-SyncHub {
     Write-Host "  Senha Hub: " -ForegroundColor Yellow -NoNewline
     $hubPass = Read-Host
     $hubUrl = $hubUrl.TrimEnd('/')
+    $encPathRel = if ($Cfg.HubEncaminharPath -and $Cfg.HubEncaminharPath.ToString().Trim()) {
+        $Cfg.HubEncaminharPath.ToString().Trim()
+    } else { 'home' }
     Write-Host ""
 
     # Login
@@ -1631,15 +1780,22 @@ function Invoke-SyncHub {
         $num = $ticket.Numero
         if (-not $num) { continue }
 
-        $payload = Build-HubTicket $ticket
+        $basePayload = Build-HubTicket $ticket
 
         if ($existingMap.ContainsKey($num)) {
-            # Ticket ja existe - compara estado, cliente, abertura e todas as atualizacoes
             $hub = $existingMap[$num]
-            if (Test-HubRelatorioChanged $hub $payload) {
+            if (Test-HubRelatorioChanged $hub $basePayload) {
                 Write-Host ""
-                Write-Host ("  [UPD] #" + $num + " - diferenca em relacao ao Hub (estado, cliente, datas ou notas)") -ForegroundColor Cyan
+                Write-Host ("  [UPD] #" + $num + " - diferenca em relacao ao Hub (dados OTRS ou ocorrencia no payload)") -ForegroundColor Cyan
+                Show-HubTicketPreview $basePayload
+                $occ = Read-OcorrenciaMultiline
+                $payload = Build-HubTicket $ticket -Ocorrencia $occ
                 Show-HubTicketPreview $payload
+                Write-Info "Abrindo formulario HTML de revisao no navegador..."
+                try { Show-HubRelatorioFormHtml $payload $hubUrl } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+                Write-Host ""
+                Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
+                $null = Read-Host "  Pressione Enter para continuar"
                 Write-Host "  Atualizar registro no Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
                 $r = Read-Host
                 if ($r -eq '' -or $r -match '^[Ss]') {
@@ -1647,6 +1803,7 @@ function Invoke-SyncHub {
                         Hub-Put $hubUrl ("/api/relatorio/" + $num) $payload | Out-Null
                         Write-OK ("Atualizado: #" + $num)
                         $nUpd++
+                        Invoke-HubPerguntaAbrirEncaminhar $hubUrl $encPathRel
                     } catch {
                         Write-Warn ("Falha: " + $_)
                     }
@@ -1658,11 +1815,18 @@ function Invoke-SyncHub {
                 $nSkip++
             }
         } else {
-            # Ticket novo - pede confirmacao
             Write-Host ""
             Write-ThinDiv 'Yellow'
             Write-Host "  NOVO TICKET:" -ForegroundColor Yellow
+            Show-HubTicketPreview $basePayload
+            $occ = Read-OcorrenciaMultiline
+            $payload = Build-HubTicket $ticket -Ocorrencia $occ
             Show-HubTicketPreview $payload
+            Write-Info "Abrindo formulario HTML de revisao no navegador..."
+            try { Show-HubRelatorioFormHtml $payload $hubUrl } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+            Write-Host ""
+            Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
+            $null = Read-Host "  Pressione Enter para continuar"
             Write-Host "  Adicionar ao Hub? [S/n]: " -ForegroundColor Yellow -NoNewline
             $r = Read-Host
             if ($r -eq '' -or $r -match '^[Ss]') {
@@ -1670,6 +1834,7 @@ function Invoke-SyncHub {
                     Hub-Post $hubUrl "/api/relatorio" $payload | Out-Null
                     Write-OK ("Adicionado: #" + $num)
                     $nNew++
+                    Invoke-HubPerguntaAbrirEncaminhar $hubUrl $encPathRel
                 } catch {
                     Write-Warn ("Falha: " + $_)
                 }
@@ -1742,8 +1907,9 @@ function Show-Configuracoes {
     $Cfg.SearchPath = Read-Field "Perfil de busca (SearchPath)" $Cfg.SearchPath
     $Cfg.EstadoFile = Read-Field "Arquivo de cache (JSON)"      $Cfg.EstadoFile
     $Cfg.OutputPath = Read-Field "Pasta de saida"               $Cfg.OutputPath
-    if (-not $Cfg.HubBaseURL) { $Cfg.HubBaseURL = 'http://172.16.0.49:3210' }
+    if (-not $Cfg.HubEncaminharPath) { $Cfg.HubEncaminharPath = 'home' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
+    $Cfg.HubEncaminharPath = Read-Field "Hub: rota web apos envio (encaminhar ex.: home ou relatorio)" $Cfg.HubEncaminharPath
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
@@ -1798,7 +1964,7 @@ function Show-MainMenu {
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
         Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Perfil de busca, cache, pasta de saida, URL do Hub'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
-        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login /api/login e envio para /api/relatorio (sem ocorrencia)'
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'HTML + validacao; API /api/relatorio; opcao abrir Hub para encaminhar'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
