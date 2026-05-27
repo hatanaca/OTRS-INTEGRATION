@@ -4,8 +4,9 @@
     Exemplo: preencher o Gerador CCO no browser com Selenium (WebDriver).
 
 .DESCRIPTION
-    NAO e chamado pelo Menu-OTRS por defeito. Use quando quiser automacao
-    real no formulario (sem colar script na consola).
+    NAO e chamado pelo Menu-OTRS por defeito (use HubWebDriverEnabled=true
+    no config.json para o fluxo integrado na opcao 7 — ver docs/automacao-formulario-hub.md).
+    Use este ficheiro isoladamente quando quiser automacao real no formulario.
 
     Pre-requisitos:
       Install-Module Selenium -Scope CurrentUser

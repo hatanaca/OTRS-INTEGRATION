@@ -35,9 +35,8 @@ Menos habitual para formulários web complexos: extensão que recebe JSON (mensa
 
 ## Integrar com o Menu-OTRS
 
-Sem tornar o Selenium obrigatório para todos:
+No `config.json` defina **`HubWebDriverEnabled`** como `true` e **`HubWebDriverBrowser`** como `Chrome` ou `Edge`. Instale o módulo: `Install-Module Selenium -Scope CurrentUser`. Na **opção 7**, após abrir os HTML de revisão, o script pergunta se deseja abrir o WebDriver e preencher o Gerador (nova janela de browser; **faça login no Hub** nessa janela se a sessão for independente da API).
 
-- **Opção A:** Manter o fluxo actual (API + página “Preencher Hub” com script na consola) e usar o exemplo em `scripts/` só nas máquinas que precisem de automação total.  
-- **Opção B:** No `Menu-OTRS.ps1`, após `Build-HubTicket`, gravar o JSON num ficheiro temporário e chamar `& .\scripts\Exemplo-HubRelatorio-Selenium.ps1 -PayloadPath …` se existir um ficheiro “gancho” ou parâmetro `-UseWebDriver` (pode adicionar ao `config.json` uma chave `HubWebDriverScriptPath` apontando para o seu `.ps1` personalizado).
+Sem alterar o `config.json`, o fluxo Selenium **não** é oferecido (apenas HTML + API).
 
-A equipa do Hub continua a ser o sítio certo para uma solução **sem** WebDriver, se o objectivo for zero instalação extra nos postos.
+Sem alterar o `config.json`, pode usar o exemplo em **`scripts/Exemplo-HubRelatorio-Selenium.ps1`** (payload num ficheiro JSON).

@@ -125,6 +125,8 @@ function Load-Config {
         HubPostTicketPaths   = ''
         HubPutTicketPaths    = ''
         HubFormSelectors     = $null
+        HubWebDriverEnabled  = $false
+        HubWebDriverBrowser  = 'Chrome'
     }
     if (Test-Path $Path) {
         try {
@@ -145,6 +147,15 @@ function Load-Config {
             if ($propNames -contains 'HubPassword') { $cfg.HubPassword = [string]$j.HubPassword }
             if ($propNames -contains 'HubFormSelectors' -and $null -ne $j.HubFormSelectors) {
                 $cfg.HubFormSelectors = $j.HubFormSelectors
+            }
+            if ($propNames -contains 'HubWebDriverEnabled') {
+                $v = $j.HubWebDriverEnabled
+                if ($v -is [bool]) { $cfg.HubWebDriverEnabled = $v }
+                elseif ($v -is [string]) { $cfg.HubWebDriverEnabled = $v.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
+                else { $cfg.HubWebDriverEnabled = [bool]$v }
+            }
+            if ($propNames -contains 'HubWebDriverBrowser') {
+                $cfg.HubWebDriverBrowser = [string]$j.HubWebDriverBrowser
             }
         } catch { }
     }
@@ -168,6 +179,8 @@ function Save-Config {
         HubPostTicketPaths  = $Cfg.HubPostTicketPaths
         HubPutTicketPaths   = $Cfg.HubPutTicketPaths
         HubFormSelectors    = $Cfg.HubFormSelectors
+        HubWebDriverEnabled = $Cfg.HubWebDriverEnabled
+        HubWebDriverBrowser = $Cfg.HubWebDriverBrowser
     } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
 }
 
@@ -2330,6 +2343,152 @@ function Show-HubRelatorioFormHtml {
     Start-Process -FilePath $path2
 }
 
+function Test-HubSeleniumModuleAvailable {
+    return [bool](Get-Module -ListAvailable -Name Selenium)
+}
+
+function Invoke-HubRelatorioSeleniumFill {
+    param([string]$HubPageUrl, $Payload, [string]$Browser = 'Chrome')
+
+    Import-Module Selenium -ErrorAction Stop
+
+    $Driver = $null
+    try {
+        $br = ($Browser -as [string]).Trim()
+        if ($br -match '^[Ee]dge') {
+            if (Get-Command Start-SeEdge -ErrorAction SilentlyContinue) {
+                $Driver = Start-SeEdge
+            }
+        }
+        if (-not $Driver -and (Get-Command Start-SeChrome -ErrorAction SilentlyContinue)) {
+            $Driver = Start-SeChrome
+        }
+        if (-not $Driver) {
+            throw "Nao foi possivel iniciar Chrome nem Edge (Start-SeChrome / Start-SeEdge). Verifique o modulo Selenium."
+        }
+
+        Enter-SeUrl -Url $HubPageUrl -Driver $Driver
+
+        function Get-SeFieldByName {
+            param([string]$FieldName, [int]$TimeoutSec = 30)
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $el = Find-SeElement -Driver $Driver -Wait -Timeout 2 -Name $FieldName -ErrorAction SilentlyContinue
+                    if ($el) { return $el }
+                } catch { }
+                Start-Sleep -Milliseconds 400
+            }
+            return $null
+        }
+
+        function Set-SeFieldValue {
+            param($Element, [string]$Text)
+            if ($null -eq $Element) { return }
+            Send-SeKeys -Element $Element -Keys ([OpenQA.Selenium.Keys]::Control + 'a')
+            Send-SeKeys -Element $Element -Keys $Text
+        }
+
+        $elNum = Get-SeFieldByName 'number'
+        Set-SeFieldValue $elNum ([string]$Payload.number)
+
+        $elSt = Get-SeFieldByName 'status'
+        if ($elSt) { Set-SeFieldValue $elSt ([string]$Payload.status) }
+
+        $elOd = Get-SeFieldByName 'openingDate'
+        if ($elOd) { Set-SeFieldValue $elOd ([string]$Payload.openingDate) }
+
+        $elOh = Get-SeFieldByName 'openingHour'
+        if ($elOh) { Set-SeFieldValue $elOh ([string]$Payload.openingHour) }
+
+        $elCl = Get-SeFieldByName 'client'
+        if ($elCl) { Set-SeFieldValue $elCl ([string]$Payload.client) }
+
+        if ($Payload.occurrence -or $Payload.ocorrencia) {
+            $occ = if ($Payload.occurrence) { [string]$Payload.occurrence } else { [string]$Payload.ocorrencia }
+            $elOc = Get-SeFieldByName 'occurrence'
+            if (-not $elOc) { $elOc = Get-SeFieldByName 'ocorrencia' }
+            if ($elOc) { Set-SeFieldValue $elOc $occ }
+        }
+
+        $updates = @($Payload.updates)
+        if ($updates.Count -gt 0) {
+            try {
+                $rows = $Driver.FindElements([OpenQA.Selenium.By]::CssSelector('table tbody tr'))
+            } catch {
+                $rows = @()
+            }
+            if ($rows -and $rows.Count -gt 0) {
+                $max = [Math]::Min($updates.Count, $rows.Count)
+                for ($ri = 0; $ri -lt $max; $ri++) {
+                    $row = $rows[$ri]
+                    try {
+                        $fields = $row.FindElements([OpenQA.Selenium.By]::CssSelector('input, textarea'))
+                    } catch { $fields = @() }
+                    if (-not $fields -or $fields.Count -eq 0) { continue }
+                    $u = $updates[$ri]
+                    $ud = ''
+                    $uh = ''
+                    $tx = ''
+                    if ($null -ne $u.updateDate) { $ud = [string]$u.updateDate } elseif ($null -ne $u.date) { $ud = [string]$u.date }
+                    if ($null -ne $u.updateHour) { $uh = [string]$u.updateHour } elseif ($null -ne $u.hour) { $uh = [string]$u.hour }
+                    if ($null -ne $u.text) { $tx = [string]$u.text }
+                    if ($fields.Count -ge 3) {
+                        Set-SeFieldValue $fields[0] $ud
+                        Set-SeFieldValue $fields[1] $uh
+                        Set-SeFieldValue $fields[2] $tx
+                    } elseif ($fields.Count -eq 2) {
+                        Set-SeFieldValue $fields[0] $ud
+                        Set-SeFieldValue $fields[1] $tx
+                    } elseif ($fields.Count -eq 1) {
+                        Set-SeFieldValue $fields[0] $tx
+                    }
+                }
+            } else {
+                Write-Info "Selenium: tabela de atualizacoes nao encontrada (CSS table tbody tr); campos principais preenchidos."
+            }
+        }
+
+        Write-OK "Selenium: formulario preenchido na janela do WebDriver. Faca login no Hub se necessario e grave na UI."
+    } catch {
+        Write-Warn ("Selenium: " + $_)
+    } finally {
+        if ($null -ne $Driver) {
+            Write-Host "  Encerrar o WebDriver (fecha o browser automatizado)? [S/n]: " -ForegroundColor Yellow -NoNewline
+            $q = Read-Host
+            if ($q -eq '' -or $q -match '^[Ss]') {
+                try {
+                    if (Get-Command Stop-SeDriver -ErrorAction SilentlyContinue) {
+                        Stop-SeDriver -Target $Driver
+                    } else {
+                        $Driver.Quit()
+                    }
+                } catch {
+                    Write-Warn ("Nao foi possivel encerrar o WebDriver: " + $_)
+                }
+            }
+        }
+    }
+}
+
+function Invoke-HubMaybeSeleniumFormFill {
+    param([hashtable]$Cfg, [string]$HubUrl, [string]$EncPathRel, $Payload)
+    if (-not $Cfg.HubWebDriverEnabled) { return }
+    if (-not (Test-HubSeleniumModuleAvailable)) {
+        Write-Warn "HubWebDriverEnabled=true mas o modulo Selenium nao esta instalado (Install-Module Selenium -Scope CurrentUser)."
+        return
+    }
+    Write-Host ""
+    Write-Host "  Preencher o Gerador CCO via Selenium (nova janela de browser)? [s/N]: " -ForegroundColor Yellow -NoNewline
+    $a = Read-Host
+    if ($a -notmatch '^[Ss]') { return }
+    $page = Get-HubEncaminharUri $HubUrl $EncPathRel
+    $br = if ($Cfg.HubWebDriverBrowser -and $Cfg.HubWebDriverBrowser.ToString().Trim()) {
+        $Cfg.HubWebDriverBrowser.ToString().Trim()
+    } else { 'Chrome' }
+    Invoke-HubRelatorioSeleniumFill -HubPageUrl $page -Payload $Payload -Browser $br
+}
+
 function Invoke-HubPerguntaAbrirEncaminhar {
     param([string]$HubUrl, [string]$EncaminharPath)
     Write-Host "  Abrir Hub no navegador (pagina Gerador CCO / encaminhar)? [S/n]: " -ForegroundColor Yellow -NoNewline
@@ -2350,8 +2509,8 @@ function Invoke-SyncHub {
     Write-Banner
     Write-Centered "-- SINCRONIZAR COM HUB --" 'White'
     Write-Host ""
-    Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, duas paginas HTML (pre-visualizacao + guia para preencher o formulario no Hub), confirmacao e envio pela API."
-    Write-Info "O Gerador CCO (ex.: /api/relatorio) e o formulario no browser; o guia HTML gera um script para colar na Consola (F12) nessa aba e preencher campos."
+    Write-Info "Fluxo: resumo no terminal, ocorrencia opcional, HTML de revisao + guia consola; opcionalmente Selenium (WebDriver) para preencher o Gerador; depois confirmacao e API."
+    Write-Info "Com HubWebDriverEnabled=true e modulo Selenium instalado, pode abrir-se uma janela de browser automatizada no Gerador CCO."
     Write-Info "A sincronizacao por API (GET/POST/PUT em .../tickets) grava no servidor; depois pode abrir o Hub na rota configurada (padrao api/relatorio)."
     Write-Host ""
 
@@ -2454,6 +2613,7 @@ function Invoke-SyncHub {
                 Show-HubTicketPreview $payload
                 Write-Info "Abrindo formulario HTML de revisao no navegador..."
                 try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+                Invoke-HubMaybeSeleniumFormFill $Cfg $hubUrl $encPathRel $payload
                 Write-Host ""
                 Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
                 $null = Read-Host "  Pressione Enter para continuar"
@@ -2487,6 +2647,7 @@ function Invoke-SyncHub {
             Show-HubTicketPreview $payload
             Write-Info "Abrindo formulario HTML de revisao no navegador..."
             try { Show-HubRelatorioFormHtml $payload $hubUrl $Cfg } catch { Write-Warn ("Falha ao abrir HTML: " + $_) }
+            Invoke-HubMaybeSeleniumFormFill $Cfg $hubUrl $encPathRel $payload
             Write-Host ""
             Write-Info "Valide os dados no navegador; em seguida confirme o envio abaixo."
             $null = Read-Host "  Pressione Enter para continuar"
@@ -2587,6 +2748,12 @@ function Show-Configuracoes {
     Write-Info "Avancado: se o POST/PUT automatico falhar, defina rotas (separadas por ;). Deixe vazio para tentativas automaticas."
     $Cfg.HubPostTicketPaths = Read-Field "Hub POST (vazio=auto; principal: api/relatorio/tickets; legado: api/relatorio/ticket)" ([string]$Cfg.HubPostTicketPaths)
     $Cfg.HubPutTicketPaths  = Read-Field "Hub PUT (vazio=auto; {numero} = n. OTRS; ex.: api/relatorio/tickets/{numero})" ([string]$Cfg.HubPutTicketPaths)
+    $wdDef = if ($Cfg.HubWebDriverEnabled) { 's' } else { 'n' }
+    $wdIn = Read-Field "Hub: oferecer preenchimento via Selenium WebDriver na sync (s/N)" $wdDef
+    $Cfg.HubWebDriverEnabled = ($wdIn -match '^[Ss]')
+    $Cfg.HubWebDriverBrowser = Read-Field "Hub WebDriver: browser (Chrome ou Edge)" ([string]$Cfg.HubWebDriverBrowser)
+    if (-not ($Cfg.HubWebDriverBrowser -as [string]).Trim()) { $Cfg.HubWebDriverBrowser = 'Chrome' }
+    Write-Info "Selenium: Install-Module Selenium -Scope CurrentUser (API classica Start-SeChrome). Ver docs/automacao-formulario-hub.md."
     Write-Info "Opcional: HubFormSelectors no config.json (JSON) afinar selectores ao colar o script na consola do Hub — ver README."
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
@@ -2642,7 +2809,7 @@ function Show-MainMenu {
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
         Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub (URL, API, email/senha API)'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
-        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'POST/PUT com rotas alternativas; JSON+ajuda se API falhar'
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'API + HTML; Selenium opcional; JSON+ajuda se API falhar'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""

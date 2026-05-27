@@ -27,6 +27,8 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubPostTicketPaths` | (Opcional) Caminhos POST para criar ticket, separados por `;` ou `,`. Vazio = ordem automática: **`api/relatorio/tickets`** primeiro, depois `…/ticket`, prefixo raiz e outras rotas. |
 | `HubPutTicketPaths` | (Opcional) Caminhos PUT; use `{numero}` para o número OTRS. Vazio = tenta `…/tickets/{numero}`, `…/{numero}`, `…/ticket/{numero}`, etc. |
 | `HubFormSelectors` | (Opcional) Objeto JSON: por campo (`number`, `status`, `openingDate`, `openingHour`, `client`, `occurrence`) uma lista de selectores CSS a tentar **antes** dos padroes, ao usar a pagina «Preencher Hub» (script na consola). |
+| `HubWebDriverEnabled` | Se `true`, na opção **7** (após abrir os HTML) pergunta se deve abrir **Selenium WebDriver** e preencher o Gerador CCO numa nova janela de browser. Requer `Install-Module Selenium`. |
+| `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |
 
 Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
@@ -41,7 +43,7 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
-7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets` para a lista; **POST**/`PUT` nos caminhos configurados. Abre-se HTML de pré-visualização e outro com **script para colar na consola** do Gerador (`/api/relatorio`) e preencher o formulário. Após `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`).
+7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets` para a lista; **POST**/`PUT` nos caminhos configurados. HTML de pré-visualização + guia para consola; com **`HubWebDriverEnabled`** pergunta se abre **Selenium** para preencher o Gerador. Após `POST`/`PUT`, pode abrir o Hub (`HubEncaminharPath`).
 
 ### Normalização (avisos ao operador)
 
@@ -61,7 +63,7 @@ Na opção **7**, além do HTML de pré-visualização, abre-se uma segunda pág
 
 Alternativa sem consola: use apenas a **API** (confirmação no terminal); os tickets passam a existir no servidor e o Gerador costuma **listá-los** após recarregar ou conforme o `relatorioCco.js` sincroniza.
 
-Para **automação nativa** (browser a escrever nos campos sem colar na consola), o Menu-OTRS em si não substitui o WebDriver: veja o guia **`docs/automacao-formulario-hub.md`** e o exemplo **`scripts/Exemplo-HubRelatorio-Selenium.ps1`** (Selenium + PowerShell), ou altere o Hub para aceitar rascunho por URL/API no mesmo *origin*.
+Para **automação nativa** no formulário, defina **`HubWebDriverEnabled`** no `config.json`, instale o módulo **Selenium** e use a opção **7** (o script pergunta antes de abrir o WebDriver). Detalhes em **`docs/automacao-formulario-hub.md`**. Alternativa: alterar o Hub para aceitar rascunho por URL/API no mesmo *origin*.
 
 Exemplo de `HubFormSelectors` (inspecione o DOM do Hub com F12 → inspetor):
 

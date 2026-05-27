@@ -12,5 +12,7 @@
   "HubApiRelatorioPath": "api/relatorio",
   "HubPostTicketPaths": "",
   "HubPutTicketPaths": "",
-  "HubFormSelectors": null
+  "HubFormSelectors": null,
+  "HubWebDriverEnabled": false,
+  "HubWebDriverBrowser": "Chrome"
 }
