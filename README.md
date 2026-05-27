@@ -23,7 +23,9 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubEncaminharPath` | Rota aberta no navegador após envio (padrão `api/relatorio` = página **Gerador de Relatório CCO**). Use `home` se preferir o painel inicial. |
 | `HubEmail` | E-mail do login JSON do Hub (`POST /api/login`) — opcional; se preenchido, a opção 7 usa como padrão |
 | `HubPassword` | Senha do Hub para a mesma API — **texto claro**; opcional com Enter na sincronização para reutilizar a gravada |
-| `HubApiRelatorioPath` | Caminho relativo à URL base para listar/criar relatórios (padrão `api/relatorio`). Se o servidor responder `Cannot POST /api/relatorio`, ajuste para o caminho real (ex.: `api/relatorios`), conforme o Hub expõe na rede (DevTools → Network). |
+| `HubApiRelatorioPath` | Caminho relativo à URL base para **GET** da lista (padrão `api/relatorio`). O **POST** de novo ticket pode estar noutra rota — o script tenta varias automaticamente ou use `HubPostTicketPaths`. |
+| `HubPostTicketPaths` | (Opcional) Caminhos POST para criar ticket, separados por `;` ou `,`. Vazio = tentativas automaticas (`api/relatorio/ticket`, `api/tickets`, etc.). |
+| `HubPutTicketPaths` | (Opcional) Caminhos PUT para atualizar; use `{numero}` no caminho. Vazio = tentativas automaticas. |
 
 Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
@@ -54,7 +56,7 @@ A página **`/api/relatorio`** do Hub é o gerador integrado: os tickets são **
 
 ### Erros comuns
 
-- **`Cannot POST /...`** (HTTP 404): o caminho da API no servidor não corresponde ao padrão. No navegador, com o Hub autenticado, abra as ferramentas de rede e veja qual URL o front usa para criar relatório; copie só a parte após o host (ex.: `api/v1/relatorios`) para `HubApiRelatorioPath` no `config.json` ou no menu **Configurações** (5).
+- **`Cannot POST /api/relatorio`**: em muitos Hubs essa URL só serve a **página** (GET HTML); o **POST** do ticket está noutro caminho. O script já tenta várias rotas em sequência. Se ainda falhar, veja no DevTools (Network) o URL exato ao gravar um ticket e preencha `HubPostTicketPaths` no `config.json` ou no menu **5**. Se **todas** as tentativas falharem, o script grava `Hub_ticket_<n>_*.json`, copia o JSON para a área de transferência, abre o Gerador CCO e uma página HTML de ajuda na pasta de saída.
 - **`JSON primitivo inválido` / lista vazia na leitura**: o `GET` de listagem devolveu corpo que não é JSON (por exemplo `.` ou HTML). Com `HubApiRelatorioPath` correto e sessão válida após login, a resposta deve ser um array ou objeto JSON.
 
 A detecção de mudança para atualização compara: status, cliente, data/hora de abertura e **todas** as entradas de atualização (não só a contagem de notas). Se o payload incluir `ocorrencia`, essa propriedade também entra na comparação com o registo existente no Hub.

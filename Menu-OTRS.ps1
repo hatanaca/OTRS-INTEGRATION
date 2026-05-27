@@ -122,6 +122,8 @@ function Load-Config {
         HubEmail             = ([string]$script:MenuOtrsHubDefaultEmail).Trim()
         HubPassword          = [string]$script:MenuOtrsHubDefaultPassword
         HubApiRelatorioPath  = 'api/relatorio'
+        HubPostTicketPaths   = ''
+        HubPutTicketPaths    = ''
     }
     if (Test-Path $Path) {
         try {
@@ -136,6 +138,8 @@ function Load-Config {
             if ($j.HubEncaminharPath)    { $cfg.HubEncaminharPath    = $j.HubEncaminharPath    }
             if ($j.HubApiRelatorioPath)  { $cfg.HubApiRelatorioPath  = $j.HubApiRelatorioPath  }
             $propNames = @($j.PSObject.Properties | ForEach-Object { $_.Name })
+            if ($propNames -contains 'HubPostTicketPaths') { $cfg.HubPostTicketPaths = [string]$j.HubPostTicketPaths }
+            if ($propNames -contains 'HubPutTicketPaths')  { $cfg.HubPutTicketPaths  = [string]$j.HubPutTicketPaths  }
             if ($propNames -contains 'HubEmail')    { $cfg.HubEmail    = [string]$j.HubEmail }
             if ($propNames -contains 'HubPassword') { $cfg.HubPassword = [string]$j.HubPassword }
         } catch { }
@@ -157,6 +161,8 @@ function Save-Config {
         HubEmail            = $Cfg.HubEmail
         HubPassword         = $Cfg.HubPassword
         HubApiRelatorioPath = $Cfg.HubApiRelatorioPath
+        HubPostTicketPaths  = $Cfg.HubPostTicketPaths
+        HubPutTicketPaths   = $Cfg.HubPutTicketPaths
     } | ConvertTo-Json | Out-File $Path -Encoding UTF8
 }
 
@@ -1734,6 +1740,174 @@ function Hub-Put {
     }
 }
 
+function Get-HubPostTicketCandidatePaths {
+    param([string]$ApiRelRoot, [hashtable]$Cfg)
+    $root = $ApiRelRoot.TrimEnd('/')
+    $list = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    function Add-HubPath([string]$p) {
+        if (-not $p) { return }
+        if (-not $p.StartsWith('/')) { $p = '/' + $p.TrimStart('/') }
+        if ($seen.ContainsKey($p)) { return }
+        [void]$seen.Add($p, $true)
+        $list.Add($p)
+    }
+    $custom = ($Cfg.HubPostTicketPaths -as [string])
+    if ($custom -and $custom.Trim()) {
+        foreach ($part in ($custom -split '[,;\|]')) {
+            Add-HubPath $part.Trim()
+        }
+        return ,$list.ToArray()
+    }
+    Add-HubPath $ApiRelRoot
+    Add-HubPath ($root + '/ticket')
+    Add-HubPath ($root + '/tickets')
+    Add-HubPath '/api/ticket'
+    Add-HubPath '/api/tickets'
+    Add-HubPath '/api/relatorio/ticket'
+    Add-HubPath '/api/cco/ticket'
+    return ,$list.ToArray()
+}
+
+function Get-HubPutTicketCandidatePaths {
+    param([string]$ApiRelRoot, [string]$Num, [hashtable]$Cfg)
+    $root = $ApiRelRoot.TrimEnd('/')
+    $list = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    function Add-HubPath([string]$p) {
+        if (-not $p) { return }
+        $p = $p.Replace('{numero}', $Num).Replace('{n}', $Num)
+        if (-not $p.StartsWith('/')) { $p = '/' + $p.TrimStart('/') }
+        if ($seen.ContainsKey($p)) { return }
+        [void]$seen.Add($p, $true)
+        $list.Add($p)
+    }
+    $custom = ($Cfg.HubPutTicketPaths -as [string])
+    if ($custom -and $custom.Trim()) {
+        foreach ($part in ($custom -split '[,;\|]')) {
+            Add-HubPath $part.Trim()
+        }
+        return ,$list.ToArray()
+    }
+    Add-HubPath ($root + '/' + $Num)
+    Add-HubPath ($root + '/ticket/' + $Num)
+    Add-HubPath ('/api/tickets/' + $Num)
+    Add-HubPath ('/api/ticket/' + $Num)
+    return ,$list.ToArray()
+}
+
+function Hub-PostWithPathFallback {
+    param([string]$HubUrl, [string[]]$Paths, $Body)
+    $lastEx = $null
+    foreach ($p in $Paths) {
+        try {
+            $r = Hub-Post $HubUrl $p $Body
+            Write-Info ("Hub: POST aceito em " + $p)
+            return $r
+        } catch {
+            $lastEx = $_
+        }
+    }
+    throw $lastEx
+}
+
+function Hub-PutWithPathFallback {
+    param([string]$HubUrl, [string[]]$Paths, $Body)
+    $lastEx = $null
+    foreach ($p in $Paths) {
+        try {
+            $r = Hub-Put $HubUrl $p $Body
+            Write-Info ("Hub: PUT aceito em " + $p)
+            return $r
+        } catch {
+            $lastEx = $_
+        }
+    }
+    throw $lastEx
+}
+
+function Export-HubTicketAssistantHtml {
+    param([string]$JsonText, [string]$HubPageUrl, [string]$TicketNum, [string]$OutPath)
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($JsonText))
+    $escUrl = [System.Net.WebUtility]::HtmlEncode($HubPageUrl)
+    $html = @"
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<title>Hub ticket #$TicketNum — JSON</title>
+<style>
+body{font-family:Segoe UI,sans-serif;background:#1e293b;color:#e2e8f0;padding:1.5rem;max-width:56rem;margin:0 auto;}
+textarea{width:100%;min-height:14rem;font-family:Consolas,monospace;font-size:12px;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:10px;}
+button,a.btn{margin:8px 8px 0 0;padding:10px 16px;border-radius:6px;border:none;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
+button{background:#2563eb;color:#fff;}
+a.btn{background:#059669;color:#fff;}
+p{color:#94a3b8;font-size:14px;}
+</style>
+</head>
+<body>
+<h1>Ticket #$TicketNum</h1>
+<p>O POST automatico para a API do Hub falhou. Use o JSON abaixo: copie e siga o fluxo do Gerador CCO no navegador (ou peça ao desenvolvedor a rota POST correta).</p>
+<p><a class="btn" href="$escUrl" target="_blank" rel="noopener">Abrir Gerador CCO</a></p>
+<textarea id="jx" readonly></textarea>
+<p>
+<button type="button" id="cp">Copiar JSON</button>
+</p>
+<script>
+(function(){
+  var b64 = '$b64';
+  var bin = atob(b64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+  var txt = new TextDecoder('utf-8').decode(bytes);
+  document.getElementById('jx').value = txt;
+  document.getElementById('cp').onclick = function() {
+    var el = document.getElementById('jx');
+    el.select();
+    el.setSelectionRange(0, 99999999);
+    try { navigator.clipboard.writeText(el.value); alert('Copiado.'); }
+    catch (e) { document.execCommand('copy'); alert('Tente Ctrl+C.'); }
+  };
+})();
+</script>
+</body>
+</html>
+"@
+    $html | Out-File -LiteralPath $OutPath -Encoding utf8
+}
+
+function Invoke-HubManualPayloadAssist {
+    param([string]$HubUrl, [string]$RelPagePath, $Payload, [string]$TicketNum, [hashtable]$Cfg)
+    $json = $Payload | ConvertTo-Json -Depth 8
+    $outDir = $Cfg.OutputPath
+    if (-not [System.IO.Path]::IsPathRooted($outDir)) { $outDir = Join-Path $PWD.Path $outDir }
+    if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $jsonPath = Join-Path $outDir ('Hub_ticket_' + $TicketNum + '_' + $stamp + '.json')
+    $htmlPath = Join-Path $outDir ('Hub_ticket_' + $TicketNum + '_' + $stamp + '_ajuda.html')
+    $json | Out-File -LiteralPath $jsonPath -Encoding utf8
+    $rel = if ($RelPagePath) { $RelPagePath.Trim().TrimStart('/') } else { 'api/relatorio' }
+    $hubPage = $HubUrl.TrimEnd('/') + '/' + $rel
+    Export-HubTicketAssistantHtml -JsonText $json -HubPageUrl $hubPage -TicketNum $TicketNum -OutPath $htmlPath
+    $clipOk = $false
+    try {
+        $json | Set-Clipboard
+        $clipOk = $true
+    } catch { }
+    try { Start-Process -FilePath $hubPage } catch { }
+    try { Start-Process -FilePath $htmlPath } catch { }
+    Write-Host ""
+    Write-Warn "Nenhuma rota POST automatica foi aceita pelo servidor (ou sessao sem permissao)."
+    Write-Info "JSON gravado:"
+    Write-Host ("  " + $jsonPath) -ForegroundColor Yellow
+    Write-Info "Pagina de ajuda (copiar JSON / link Hub):"
+    Write-Host ("  " + $htmlPath) -ForegroundColor Yellow
+    if ($clipOk) {
+        Write-Info "O JSON tambem foi copiado para a area de transferencia (Ctrl+V)."
+    }
+    Write-Info "Abra o Gerador CCO, adicione o ticket e preencha com estes dados se o Hub nao tiver importacao automatica."
+}
+
 function Build-HubTicket {
     param($Ticket, [int]$MaxUpdates = 10, [string]$Ocorrencia = '')
 
@@ -2071,12 +2245,14 @@ function Invoke-SyncHub {
                 $r = Read-Host
                 if ($r -eq '' -or $r -match '^[Ss]') {
                     try {
-                        Hub-Put $hubUrl ($apiRelRoot.TrimEnd('/') + '/' + $num) $payload | Out-Null
+                        $putPaths = @(Get-HubPutTicketCandidatePaths $apiRelRoot $num $Cfg)
+                        Hub-PutWithPathFallback $hubUrl $putPaths $payload | Out-Null
                         Write-OK ("Atualizado: #" + $num)
                         $nUpd++
                         Invoke-HubPerguntaAbrirEncaminhar $hubUrl $encPathRel
                     } catch {
                         Write-Warn ("Falha: " + (Get-HubHttpErrorDetail $_))
+                        Invoke-HubManualPayloadAssist $hubUrl $encPathRel $payload $num $Cfg
                     }
                 } else {
                     Write-Info ("Pulado: #" + $num) ; $nSkip++
@@ -2102,12 +2278,14 @@ function Invoke-SyncHub {
             $r = Read-Host
             if ($r -eq '' -or $r -match '^[Ss]') {
                 try {
-                    Hub-Post $hubUrl $apiRelRoot $payload | Out-Null
+                    $postPaths = @(Get-HubPostTicketCandidatePaths $apiRelRoot $Cfg)
+                    Hub-PostWithPathFallback $hubUrl $postPaths $payload | Out-Null
                     Write-OK ("Adicionado: #" + $num)
                     $nNew++
                     Invoke-HubPerguntaAbrirEncaminhar $hubUrl $encPathRel
                 } catch {
                     Write-Warn ("Falha: " + (Get-HubHttpErrorDetail $_))
+                    Invoke-HubManualPayloadAssist $hubUrl $encPathRel $payload $num $Cfg
                 }
             } else {
                 Write-Info ("Pulado: #" + $num) ; $nSkip++
@@ -2188,6 +2366,11 @@ function Show-Configuracoes {
     Write-Host ("  Hub: senha API " + $hpHint + ": ") -ForegroundColor Yellow -NoNewline
     $hpNew = Read-Host
     if ($hpNew) { $Cfg.HubPassword = $hpNew }
+    if (-not $Cfg.HubPostTicketPaths) { $Cfg.HubPostTicketPaths = '' }
+    if (-not $Cfg.HubPutTicketPaths) { $Cfg.HubPutTicketPaths = '' }
+    Write-Info "Avancado: se o POST/PUT automatico falhar, defina rotas (separadas por ;). Deixe vazio para tentativas automaticas."
+    $Cfg.HubPostTicketPaths = Read-Field "Hub POST (vazio=auto; ex.: api/relatorio/ticket;api/tickets)" ([string]$Cfg.HubPostTicketPaths)
+    $Cfg.HubPutTicketPaths  = Read-Field "Hub PUT (vazio=auto; {numero} = ticket; ex.: api/relatorio/ticket/{numero})" ([string]$Cfg.HubPutTicketPaths)
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
@@ -2242,7 +2425,7 @@ function Show-MainMenu {
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
         Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub (URL, API, email/senha API)'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
-        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'Login API; GET/POST/PUT em HubApiRelatorioPath; HTML + encaminhar'
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'POST/PUT com rotas alternativas; JSON+ajuda se API falhar'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""

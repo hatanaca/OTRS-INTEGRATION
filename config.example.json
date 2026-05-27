@@ -9,5 +9,7 @@
   "HubEncaminharPath": "api/relatorio",
   "HubEmail": "thiago.ratanaka@microset.net.br",
   "HubPassword": "",
-  "HubApiRelatorioPath": "api/relatorio"
+  "HubApiRelatorioPath": "api/relatorio",
+  "HubPostTicketPaths": "",
+  "HubPutTicketPaths": ""
 }
