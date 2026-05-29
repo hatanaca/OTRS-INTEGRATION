@@ -1,4 +1,4 @@
-﻿﻿# =============================================================================
+﻿# =============================================================================
 # Menu-OTRS.ps1 - Interface TUI para relatorios CCO (Znuny/OTRS)
 # Versao unificada - Export-CcoReport incorporado
 # Compativel com Windows PowerShell 5.1 e PowerShell 7+
