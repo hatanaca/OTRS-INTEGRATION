@@ -16,12 +16,10 @@ $ErrorActionPreference = 'Stop'
 $script:ExportLoaded = $false
 
 # -----------------------------------------------------------------------------
-# Hub: padroes se config.json nao definir HubEmail / HubPassword.
-# Edite abaixo; valores em config.json (menu 5) prevalecem quando a chave existir.
-# ATENCAO: senha em texto claro. Nao publique este arquivo em repositorio publico.
+# Hub: padroes vazios — preencha config.json (menu 5/6) ou copie config.example.json.
 # -----------------------------------------------------------------------------
-$script:MenuOtrsHubDefaultEmail     = 'thiago.ratanaka@microset.net.br'
-$script:MenuOtrsHubDefaultPassword  = 'SenhaN2M7@'
+$script:MenuOtrsHubDefaultEmail    = ''
+$script:MenuOtrsHubDefaultPassword = ''
 
 # =============================================================================
 # Helpers de UI
@@ -109,6 +107,39 @@ function Pause-Screen {
 # Config
 # =============================================================================
 
+function ConvertTo-ConfigBool {
+    param($Value, [bool]$Default = $false)
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [string]) { return $Value.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
+    return [bool]$Value
+}
+
+function Initialize-ConfigFile {
+    param(
+        [string]$Path,
+        [string]$ExamplePath = 'config.example.json'
+    )
+    if (Test-Path $Path) { return $false }
+    $root = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
+    $candidates = @(
+        $ExamplePath,
+        (Join-Path $root $ExamplePath),
+        (Join-Path $root 'config.example.json')
+    )
+    foreach ($src in ($candidates | Select-Object -Unique)) {
+        if (-not $src -or -not (Test-Path $src)) { continue }
+        $destDir = Split-Path -Parent $Path
+        if ($destDir -and -not (Test-Path $destDir)) {
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $src -Destination $Path -Force
+        Write-Host ("  [config] Criado " + $Path + " a partir de " + $src + " — preencha Username, Password e HubPassword.") -ForegroundColor Yellow
+        return $true
+    }
+    return $false
+}
+
 function Load-Config {
     param([string]$Path)
     $cfg = @{
@@ -134,19 +165,22 @@ function Load-Config {
         HubSeleniumModulePath = ''
         FilterCustomerVisibleNotesOnly = $true
     }
+    if (-not (Test-Path $Path)) {
+        Initialize-ConfigFile -Path $Path | Out-Null
+    }
     if (Test-Path $Path) {
         try {
             $j = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($j.BaseURL)     { $cfg.BaseURL     = $j.BaseURL     }
-            if ($j.Username)    { $cfg.Username    = $j.Username    }
-            if ($j.Password)    { $cfg.Password    = $j.Password    }
-            if ($j.EstadoFile)  { $cfg.EstadoFile  = $j.EstadoFile  }
-            if ($j.OutputPath)  { $cfg.OutputPath  = $j.OutputPath  }
-            if ($j.SearchPath)  { $cfg.SearchPath  = $j.SearchPath  }
-            if ($j.HubBaseURL)           { $cfg.HubBaseURL           = $j.HubBaseURL           }
-            if ($j.HubEncaminharPath)    { $cfg.HubEncaminharPath    = $j.HubEncaminharPath    }
-            if ($j.HubApiRelatorioPath)  { $cfg.HubApiRelatorioPath  = $j.HubApiRelatorioPath  }
             $propNames = @($j.PSObject.Properties | ForEach-Object { $_.Name })
+            if ($propNames -contains 'BaseURL')     { $cfg.BaseURL     = [string]$j.BaseURL     }
+            if ($propNames -contains 'Username')    { $cfg.Username    = [string]$j.Username    }
+            if ($propNames -contains 'Password')    { $cfg.Password    = [string]$j.Password    }
+            if ($propNames -contains 'EstadoFile')  { $cfg.EstadoFile  = [string]$j.EstadoFile  }
+            if ($propNames -contains 'OutputPath')  { $cfg.OutputPath  = [string]$j.OutputPath  }
+            if ($propNames -contains 'SearchPath')  { $cfg.SearchPath  = [string]$j.SearchPath  }
+            if ($propNames -contains 'HubBaseURL')           { $cfg.HubBaseURL           = [string]$j.HubBaseURL           }
+            if ($propNames -contains 'HubEncaminharPath')    { $cfg.HubEncaminharPath    = [string]$j.HubEncaminharPath    }
+            if ($propNames -contains 'HubApiRelatorioPath')  { $cfg.HubApiRelatorioPath  = [string]$j.HubApiRelatorioPath  }
             if ($propNames -contains 'HubPostTicketPaths') { $cfg.HubPostTicketPaths = [string]$j.HubPostTicketPaths }
             if ($propNames -contains 'HubPutTicketPaths')  { $cfg.HubPutTicketPaths  = [string]$j.HubPutTicketPaths  }
             if ($propNames -contains 'HubEmail')    { $cfg.HubEmail    = [string]$j.HubEmail }
@@ -155,22 +189,13 @@ function Load-Config {
                 $cfg.HubFormSelectors = $j.HubFormSelectors
             }
             if ($propNames -contains 'HubWebDriverEnabled') {
-                $v = $j.HubWebDriverEnabled
-                if ($v -is [bool]) { $cfg.HubWebDriverEnabled = $v }
-                elseif ($v -is [string]) { $cfg.HubWebDriverEnabled = $v.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
-                else { $cfg.HubWebDriverEnabled = [bool]$v }
+                $cfg.HubWebDriverEnabled = ConvertTo-ConfigBool $j.HubWebDriverEnabled $cfg.HubWebDriverEnabled
             }
             if ($propNames -contains 'HubWebDriverAutoFill') {
-                $v2 = $j.HubWebDriverAutoFill
-                if ($v2 -is [bool]) { $cfg.HubWebDriverAutoFill = $v2 }
-                elseif ($v2 -is [string]) { $cfg.HubWebDriverAutoFill = $v2.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
-                else { $cfg.HubWebDriverAutoFill = [bool]$v2 }
+                $cfg.HubWebDriverAutoFill = ConvertTo-ConfigBool $j.HubWebDriverAutoFill $cfg.HubWebDriverAutoFill
             }
             if ($propNames -contains 'HubBrowserDirectWrite') {
-                $vd = $j.HubBrowserDirectWrite
-                if ($vd -is [bool]) { $cfg.HubBrowserDirectWrite = $vd }
-                elseif ($vd -is [string]) { $cfg.HubBrowserDirectWrite = $vd.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
-                else { $cfg.HubBrowserDirectWrite = [bool]$vd }
+                $cfg.HubBrowserDirectWrite = ConvertTo-ConfigBool $j.HubBrowserDirectWrite $cfg.HubBrowserDirectWrite
             }
             if ($propNames -contains 'HubWebDriverDebugAddress') {
                 $cfg.HubWebDriverDebugAddress = [string]$j.HubWebDriverDebugAddress
@@ -182,12 +207,11 @@ function Load-Config {
                 $cfg.HubSeleniumModulePath = [string]$j.HubSeleniumModulePath
             }
             if ($propNames -contains 'FilterCustomerVisibleNotesOnly') {
-                $vf = $j.FilterCustomerVisibleNotesOnly
-                if ($vf -is [bool]) { $cfg.FilterCustomerVisibleNotesOnly = $vf }
-                elseif ($vf -is [string]) { $cfg.FilterCustomerVisibleNotesOnly = $vf.Trim() -match '^(1|true|s|S|sim|SIM|yes|YES)$' }
-                else { $cfg.FilterCustomerVisibleNotesOnly = [bool]$vf }
+                $cfg.FilterCustomerVisibleNotesOnly = ConvertTo-ConfigBool $j.FilterCustomerVisibleNotesOnly $cfg.FilterCustomerVisibleNotesOnly
             }
-        } catch { }
+        } catch {
+            Write-Warn ("Nao foi possivel ler " + $Path + ": " + $_.Exception.Message)
+        }
     }
     return $cfg
 }
@@ -1812,6 +1836,13 @@ function Invoke-GerarCriticosVisivelCliente {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    Sync-CcoConfigFromCfg $Cfg
+    Set-CcoVisibleNotesFilter $true
+    $cachePath = $Cfg.EstadoFile
+    if (-not [System.IO.Path]::IsPathRooted($cachePath)) {
+        $cachePath = Join-Path $Cfg.OutputPath $cachePath
+    }
+    Clear-CcoTicketCache $cachePath
     $params = @{
         BaseURL                        = $Cfg.BaseURL
         Username                       = $Cfg.Username
@@ -2096,6 +2127,10 @@ function Show-VisualizadorCompleto {
         if ($resp -notmatch '^[Ss]') { return }
         Invoke-GerarTxt $Cfg $ExportScript
         if (-not (Test-Path $cachePath)) { return }
+    }
+
+    if ($Cfg.FilterCustomerVisibleNotesOnly) {
+        Write-Warn 'Cache offline: pode conter notas de exportacao antiga sem filtro. Use opcao 1, 2 ou 8 para atualizar, ou apague estado_chamados.json.'
     }
 
     try {
@@ -3675,6 +3710,7 @@ function Show-MainMenu {
 # Ponto de entrada
 # =============================================================================
 
+Initialize-ConfigFile -Path $ConfigFile | Out-Null
 $cfg             = Load-Config $ConfigFile
 Sync-CcoConfigFromCfg $cfg
 $exportScriptPath = Resolve-ExportScript $ScriptPath

@@ -35,7 +35,18 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubSeleniumModulePath` | (Opcional) Caminho para `Selenium.psd1` ou para a pasta do módulo Selenium **copiada** (sem `Install-Module`). Vazio = usa `tools\Selenium\` junto ao `Menu-OTRS.ps1` ou o módulo na Gallery. |
 | `FilterCustomerVisibleNotesOnly` | Se `true` (padrão), aplica o filtro de sessão OTRS **`CustomerVisibilityFilter=1`** (somente artigos `IsVisibleForCustomer` no banco, quando `Ticket::Frontend::TicketArticleFilter` estiver ativo no Znuny) e valida cada linha pela classe **`VisibleForCustomer`** / **`NotVisibleForCustomer`**. O cache `estado_chamados.json` é **apagado automaticamente** ao gerar relatório com este filtro. Defina `false` para importar todas as notas. |
 
-Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
+Copie `config.example.json` para `config.json` e preencha **Username**, **Password** (OTRS) e **HubPassword**. O arquivo `config.json` está no `.gitignore` (não vai para o Git). Na primeira execução, se `config.json` não existir, o `Menu-OTRS.ps1` cria uma cópia a partir de `config.example.json`. Também pode usar `scripts/Setup-Config.ps1`.
+
+**Ambiente Microset (padrão no exemplo):**
+
+| Campo | Valor |
+|--------|--------|
+| `BaseURL` | `http://172.16.0.12/znuny` |
+| `SearchPath` | `index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8` |
+| `HubBaseURL` | `http://172.16.0.49:3210` |
+| `FilterCustomerVisibleNotesOnly` | `true` |
+
+Após preencher credenciais, use a opção **8** (Críticos visíveis) ou **1**/**2** com filtro ativo. Apague `estado_chamados.json` se tiver exportado antes sem filtro.
 
 ## Menu principal
 
