@@ -929,18 +929,46 @@ function Test-ArticleHtmlHasReportDynamicField {
         [string]$ExpectedValue
     )
     if (-not $ArticleHtml -or -not $FieldName -or -not $ExpectedValue) { return $false }
-    $fnEsc = [regex]::Escape($FieldName)
+
+    # Decodificar entidades HTML antes de comparar (cobre relat&oacute;rio, Sim etc.)
+    try {
+        $decodedHtml = [System.Net.WebUtility]::HtmlDecode($ArticleHtml)
+    } catch {
+        $decodedHtml = $ArticleHtml
+    }
+
+    $fnEsc  = [regex]::Escape($FieldName)
     $valEsc = [regex]::Escape($ExpectedValue)
+
+    # Tambem monta variante do nome do campo com espacos (ex.: "Enviarpararelatorio" -> "Enviar para relatorio")
+    # Znuny exibe o label com o titulo original do campo, nao o nome interno sem espacos.
+    $fnLabel = $FieldName -replace '(?<=[a-z])(?=[A-Z])', ' '  # CamelCase -> espacos
+    $fnLabelEsc = [regex]::Escape($fnLabel)
+
     $patterns = @(
+        # 1. Input/hidden com name=DynamicField_X e value=Y
         "(?is)DynamicField_$fnEsc[^>]*\bvalue\s*=\s*[""']$valEsc[""']",
         "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*\bvalue\s*=\s*[""']$valEsc[""']",
+        # 2. Select com option selected
         "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*>\s*$valEsc\s*<",
         "(?is)DynamicField_$fnEsc[\s\S]{0,400}?<option[^>]*\bselected\b[^>]*>\s*$valEsc\s*</option>",
-        "(?is)<label[^>]*>\s*[^<]*$fnEsc[^<]*</label>\s*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
-        "(?is)<label[^>]*>\s*[^<]*Enviar[^<]*relat[^<]*</label>\s*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>"
+        # 3. Label pelo nome interno (sem espacos) + <p class="Value">
+        "(?is)<label[^>]*>\s*[^<]*$fnEsc[^<]*</label>\s*(?:<[^>]+>\s*)*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
+        # 4. Label pelo nome com espacos (como Znuny exibe: "Enviar para relatorio")
+        "(?is)<label[^>]*>\s*[^<]*$fnLabelEsc[^<]*</label>\s*(?:<[^>]+>\s*)*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
+        # 5. Label generico "Enviar.*relat" (cobre variacoes de acentuacao ja decodificada)
+        "(?is)<label[^>]*>\s*[^<]*Enviar[^<]*relat[^<]*</label>\s*(?:<[^>]+>\s*)*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
+        # 6. Container ArticleField com id/data contendo o nome do campo + valor visivel
+        "(?is)(?:id|data-field)\s*=\s*[""'][^""']*DynamicField_$fnEsc[^""']*[""'][^>]*>[\s\S]{0,600}?>\s*$valEsc\s*<",
+        # 7. Fallback: qualquer ocorrencia do valor esperado proximo ao nome do campo (dentro de 200 chars)
+        "(?is)DynamicField_$fnEsc[\s\S]{0,200}$valEsc"
     )
-    foreach ($p in $patterns) {
-        if ($ArticleHtml -match $p) { return $true }
+
+    # Testar contra HTML original e decodificado
+    foreach ($src in @($ArticleHtml, $decodedHtml) | Select-Object -Unique) {
+        foreach ($p in $patterns) {
+            if ($src -match $p) { return $true }
+        }
     }
     return $false
 }
@@ -997,6 +1025,9 @@ function Test-ArticleMarkedForReport {
                 if ($ReportMap) { $ReportMap[$ArticleId] = $true }
                 return $true
             }
+            # Log de diagnostico: exibe trecho do HTML do ArticleUpdate para facilitar ajuste de padroes
+            $updSnippet = if ($upd.Length -gt 600) { $upd.Substring(0, 600) } else { $upd }
+            Write-Verbose "ArticleUpdate artigo $ArticleId ticket $TicketId : campo NAO detectado. Trecho HTML (primeiros 600 chars): $updSnippet"
             if ($ReportMap) { $ReportMap[$ArticleId] = $false }
             return $false
         } catch {
