@@ -60,10 +60,17 @@ function Write-Banner {
 }
 
 function Write-StatusBar {
-    param([string]$User, [string]$HostDisplay, [string]$CfgStatus, [bool]$VisibleNotesOnly = $true)
+    param(
+        [string]$User,
+        [string]$HostDisplay,
+        [string]$CfgStatus,
+        [bool]$VisibleNotesOnly = $true,
+        [bool]$ReportDynamicFieldOnly = $true
+    )
     Write-ThinDiv 'DarkGray'
-    $visTag = if ($VisibleNotesOnly) { 'Notas: visivel cliente' } else { 'Notas: todas' }
-    Write-Host ("  Usuario: " + $User + "   Servidor: " + $HostDisplay + "   " + $visTag + "   Config: " + $CfgStatus) -ForegroundColor DarkGray
+    $visTag = if ($VisibleNotesOnly) { 'Visivel cliente: sim' } else { 'Visivel cliente: nao' }
+    $repTag = if ($ReportDynamicFieldOnly) { 'Enviar relatorio: sim' } else { 'Enviar relatorio: nao' }
+    Write-Host ("  Usuario: " + $User + "   Servidor: " + $HostDisplay + "   " + $visTag + "   " + $repTag + "   Config: " + $CfgStatus) -ForegroundColor DarkGray
     Write-ThinDiv 'DarkGray'
     Write-Host ""
 }
@@ -163,7 +170,10 @@ function Load-Config {
         HubWebDriverDebugAddress = ''
         HubWebDriverBrowser  = 'Chrome'
         HubSeleniumModulePath = ''
-        FilterCustomerVisibleNotesOnly = $true
+        FilterCustomerVisibleNotesOnly = $false
+        FilterNotesByReportDynamicField = $true
+        ArticleDynamicFieldReportName   = 'Enviarpararelatorio'
+        ArticleDynamicFieldReportValue  = 'Sim'
     }
     if (-not (Test-Path $Path)) {
         Initialize-ConfigFile -Path $Path | Out-Null
@@ -209,6 +219,15 @@ function Load-Config {
             if ($propNames -contains 'FilterCustomerVisibleNotesOnly') {
                 $cfg.FilterCustomerVisibleNotesOnly = ConvertTo-ConfigBool $j.FilterCustomerVisibleNotesOnly $cfg.FilterCustomerVisibleNotesOnly
             }
+            if ($propNames -contains 'FilterNotesByReportDynamicField') {
+                $cfg.FilterNotesByReportDynamicField = ConvertTo-ConfigBool $j.FilterNotesByReportDynamicField $cfg.FilterNotesByReportDynamicField
+            }
+            if ($propNames -contains 'ArticleDynamicFieldReportName') {
+                $cfg.ArticleDynamicFieldReportName = [string]$j.ArticleDynamicFieldReportName
+            }
+            if ($propNames -contains 'ArticleDynamicFieldReportValue') {
+                $cfg.ArticleDynamicFieldReportValue = [string]$j.ArticleDynamicFieldReportValue
+            }
         } catch {
             Write-Warn ("Nao foi possivel ler " + $Path + ": " + $_.Exception.Message)
         }
@@ -240,6 +259,9 @@ function Save-Config {
         HubWebDriverBrowser = $Cfg.HubWebDriverBrowser
         HubSeleniumModulePath = $Cfg.HubSeleniumModulePath
         FilterCustomerVisibleNotesOnly = $Cfg.FilterCustomerVisibleNotesOnly
+        FilterNotesByReportDynamicField = $Cfg.FilterNotesByReportDynamicField
+        ArticleDynamicFieldReportName   = $Cfg.ArticleDynamicFieldReportName
+        ArticleDynamicFieldReportValue  = $Cfg.ArticleDynamicFieldReportValue
     } | ConvertTo-Json -Depth 12 | Out-File $Path -Encoding UTF8
 }
 
@@ -320,7 +342,10 @@ $script:CcoConfig = @{
         'Estado do link Zabbix',
         'Status:\s*(OK|PROBLEM|DISASTER)'
     )
-    FilterCustomerVisibleNotesOnly = $true
+    FilterCustomerVisibleNotesOnly = $false
+    FilterNotesByReportDynamicField = $true
+    ArticleDynamicFieldReportName   = 'Enviarpararelatorio'
+    ArticleDynamicFieldReportValue  = 'Sim'
 }
 
 # =============================================================================
@@ -485,6 +510,26 @@ class OtrsClient {
     [string] GetArticleContent([string]$ticketID, [string]$articleID) {
         $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketArticleContent;Subaction=HTMLView;TicketID=$ticketID;ArticleID=$articleID;FileID=;"
         $response = $this.InvokeWithRetry($uri)
+        return $this.GetResponseText($response)
+    }
+
+    # Widget do artigo (ArticleMetaFields) quando a visao AgentTicketZoom mostra um artigo por vez.
+    [string] GetArticleUpdateHtml([string]$ticketID, [string]$articleID, [string]$challengeToken, [int]$count = 0) {
+        $uri = "$($this.BaseURL)/index.pl"
+        $body = @{
+            Action    = 'AgentTicketZoom'
+            Subaction = 'ArticleUpdate'
+            TicketID  = $ticketID
+            ArticleID = $articleID
+        }
+        if ($count -gt 0) { $body.Count = [string]$count }
+        if ($challengeToken) { $body.ChallengeToken = $challengeToken }
+        $headers = @{
+            'X-Requested-With' = 'XMLHttpRequest'
+            'Content-Type'     = 'application/x-www-form-urlencoded; charset=UTF-8'
+        }
+        $response = Invoke-WebRequest -Uri $uri -Method POST -Body $body `
+            -Headers $headers -WebSession $this.Session -UseBasicParsing -ErrorAction Stop
         return $this.GetResponseText($response)
     }
 
@@ -800,10 +845,181 @@ function Test-AutoNote {
 }
 
 function Get-CcoFilterVisibleOnly {
-    if ($null -eq $script:CcoConfig) { return $true }
+    if ($null -eq $script:CcoConfig) { return $false }
     $v = $script:CcoConfig.FilterCustomerVisibleNotesOnly
+    if ($null -eq $v) { return $false }
+    return [bool]$v
+}
+
+function Get-CcoFilterReportDynamicFieldOnly {
+    if ($null -eq $script:CcoConfig) { return $true }
+    $v = $script:CcoConfig.FilterNotesByReportDynamicField
     if ($null -eq $v) { return $true }
     return [bool]$v
+}
+
+function Get-CcoArticleReportDynamicFieldSettings {
+    $name = 'Enviarpararelatorio'
+    $value = 'Sim'
+    if ($script:CcoConfig) {
+        if ($script:CcoConfig.ArticleDynamicFieldReportName) {
+            $name = [string]$script:CcoConfig.ArticleDynamicFieldReportName
+        }
+        if ($script:CcoConfig.ArticleDynamicFieldReportValue) {
+            $value = [string]$script:CcoConfig.ArticleDynamicFieldReportValue
+        }
+    }
+    return [PSCustomObject]@{
+        Name  = $name.Trim()
+        Value = $value.Trim()
+    }
+}
+
+function Get-ReportDynamicFieldFilterLabel {
+    param([bool]$Enabled)
+    $settings = Get-CcoArticleReportDynamicFieldSettings
+    if ($Enabled) {
+        return ('Somente notas com DynamicField_' + $settings.Name + '=' + $settings.Value + ' (Enviar para relatorio)')
+    }
+    return 'Todas as notas (filtro DynamicField desligado)'
+}
+
+function Set-CcoReportDynamicFieldFilter {
+    param([bool]$Enabled)
+    if ($null -eq $script:CcoConfig) {
+        $script:CcoConfig = @{ FilterNotesByReportDynamicField = $Enabled }
+        return
+    }
+    $script:CcoConfig.FilterNotesByReportDynamicField = $Enabled
+}
+
+function Get-CcoAnyActiveNoteFilter {
+    return ((Get-CcoFilterVisibleOnly) -or (Get-CcoFilterReportDynamicFieldOnly))
+}
+
+function Get-ArticleHtmlScopeFromZoomHtml {
+    param(
+        [string]$HTML,
+        [string]$ArticleId
+    )
+    if (-not $HTML -or -not $ArticleId) { return '' }
+    $esc = [regex]::Escape($ArticleId)
+    $pat = '(?is)(<a\s+[^>]*\b(?:id|name)\s*=\s*["'']Article' + $esc + '["''][^>]*>)(.*?)(?=<a\s+[^>]*\b(?:id|name)\s*=\s*["'']Article\d+["'']|\z)'
+    if (($m = [regex]::Match($HTML, $pat)).Success) {
+        return $m.Groups[1].Value + $m.Groups[2].Value
+    }
+    return ''
+}
+
+function Test-ArticleHtmlHasReportDynamicField {
+    param(
+        [string]$ArticleHtml,
+        [string]$FieldName,
+        [string]$ExpectedValue
+    )
+    if (-not $ArticleHtml -or -not $FieldName -or -not $ExpectedValue) { return $false }
+    $fnEsc = [regex]::Escape($FieldName)
+    $valEsc = [regex]::Escape($ExpectedValue)
+    $patterns = @(
+        "(?is)DynamicField_$fnEsc[^>]*\bvalue\s*=\s*[""']$valEsc[""']",
+        "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*\bvalue\s*=\s*[""']$valEsc[""']",
+        "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*>\s*$valEsc\s*<",
+        "(?is)DynamicField_$fnEsc[\s\S]{0,400}?<option[^>]*\bselected\b[^>]*>\s*$valEsc\s*</option>",
+        "(?is)<label[^>]*>\s*[^<]*$fnEsc[^<]*</label>\s*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
+        "(?is)<label[^>]*>\s*[^<]*Enviar[^<]*relat[^<]*</label>\s*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>"
+    )
+    foreach ($p in $patterns) {
+        if ($ArticleHtml -match $p) { return $true }
+    }
+    return $false
+}
+
+function Get-ArticleReportFieldMapFromHtml {
+    param(
+        [string]$HTML,
+        [string]$FieldName,
+        [string]$ExpectedValue
+    )
+    $map = @{}
+    if (-not $HTML) { return $map }
+    foreach ($row in (Get-TicketArticleRowsFromHtml -HTML $HTML)) {
+        if (-not $row.ArticleId) { continue }
+        $scope = Get-ArticleHtmlScopeFromZoomHtml -HTML $HTML -ArticleId $row.ArticleId
+        if (-not $scope) { $scope = $row.RowHtml }
+        if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $scope -FieldName $FieldName -ExpectedValue $ExpectedValue) {
+            $map[$row.ArticleId] = $true
+        }
+        elseif ($scope -match ("DynamicField_" + [regex]::Escape($FieldName)) -or $scope -match 'ArticleMetaFields') {
+            $map[$row.ArticleId] = $false
+        }
+    }
+    return $map
+}
+
+function Test-ArticleMarkedForReport {
+    param(
+        [string]$ZoomHtml,
+        [string]$ArticleId,
+        [OtrsClient]$Client,
+        [string]$TicketId,
+        [string]$ChallengeToken,
+        [hashtable]$ReportMap,
+        [string]$FieldName,
+        [string]$ExpectedValue
+    )
+    if ($ReportMap -and $ReportMap.ContainsKey($ArticleId)) {
+        return [bool]$ReportMap[$ArticleId]
+    }
+    $scope = Get-ArticleHtmlScopeFromZoomHtml -HTML $ZoomHtml -ArticleId $ArticleId
+    if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $scope -FieldName $FieldName -ExpectedValue $ExpectedValue) {
+        if ($ReportMap) { $ReportMap[$ArticleId] = $true }
+        return $true
+    }
+    if ($scope -and ($scope -match ("DynamicField_" + [regex]::Escape($FieldName)) -or $scope -match 'ArticleMetaFields')) {
+        if ($ReportMap) { $ReportMap[$ArticleId] = $false }
+        return $false
+    }
+    if ($Client -and $ChallengeToken) {
+        try {
+            $upd = $Client.GetArticleUpdateHtml($TicketId, $ArticleId, $ChallengeToken)
+            if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $upd -FieldName $FieldName -ExpectedValue $ExpectedValue) {
+                if ($ReportMap) { $ReportMap[$ArticleId] = $true }
+                return $true
+            }
+            if ($ReportMap) { $ReportMap[$ArticleId] = $false }
+            return $false
+        } catch {
+            Write-Verbose "ArticleUpdate indisponivel para artigo $ArticleId ticket $TicketId : $_"
+        }
+    }
+    if ($ReportMap) { $ReportMap[$ArticleId] = $false }
+    return $false
+}
+
+function Get-OtrsArticleReportFieldStatsFromHtml {
+    param(
+        [string]$HTML,
+        [string]$FieldName,
+        [string]$ExpectedValue
+    )
+    $stats = [ordered]@{
+        TotalRows = 0
+        ForReport = 0
+        NotForReport = 0
+        Unknown = 0
+    }
+    if (-not $HTML) { return [pscustomobject]$stats }
+    $map = Get-ArticleReportFieldMapFromHtml -HTML $HTML -FieldName $FieldName -ExpectedValue $ExpectedValue
+    foreach ($row in (Get-TicketArticleRowsFromHtml $HTML)) {
+        $stats.TotalRows++
+        if (-not $row.ArticleId) { $stats.Unknown++; continue }
+        if ($map.ContainsKey($row.ArticleId)) {
+            if ($map[$row.ArticleId]) { $stats.ForReport++ } else { $stats.NotForReport++ }
+        } else {
+            $stats.Unknown++
+        }
+    }
+    return [pscustomobject]$stats
 }
 
 function Resolve-CcoEstadoFilePath {
@@ -1194,6 +1410,15 @@ function Sync-CcoConfigFromCfg {
     if ($null -ne $Cfg.FilterCustomerVisibleNotesOnly) {
         $script:CcoConfig.FilterCustomerVisibleNotesOnly = [bool]$Cfg.FilterCustomerVisibleNotesOnly
     }
+    if ($null -ne $Cfg.FilterNotesByReportDynamicField) {
+        $script:CcoConfig.FilterNotesByReportDynamicField = [bool]$Cfg.FilterNotesByReportDynamicField
+    }
+    if ($Cfg.ArticleDynamicFieldReportName) {
+        $script:CcoConfig.ArticleDynamicFieldReportName = [string]$Cfg.ArticleDynamicFieldReportName
+    }
+    if ($Cfg.ArticleDynamicFieldReportValue) {
+        $script:CcoConfig.ArticleDynamicFieldReportValue = [string]$Cfg.ArticleDynamicFieldReportValue
+    }
 }
 
 function Get-TicketDataFromHtml {
@@ -1293,17 +1518,27 @@ function Get-TicketDataFromHtml {
 
     $articles = [System.Collections.Generic.List[object]]::new()
     $filterVisibleOnly = Get-CcoFilterVisibleOnly
+    $filterReportField = Get-CcoFilterReportDynamicFieldOnly
+    $reportFieldSettings = Get-CcoArticleReportDynamicFieldSettings
     $visibilityMap = if ($filterVisibleOnly) { Get-ArticleVisibilityMapFromHtml $HTML } else { @{} }
-    $rowMatches = if ($filterVisibleOnly) {
+    $reportFieldMap = if ($filterReportField) {
+        Get-ArticleReportFieldMapFromHtml -HTML $HTML -FieldName $reportFieldSettings.Name -ExpectedValue $reportFieldSettings.Value
+    } else { @{} }
+    $rowMatches = if ($filterVisibleOnly -and -not $filterReportField) {
         Get-TicketArticleRowsFromHtml -HTML $HTML -OnlyVisibleForCustomer
     } else {
         Get-TicketArticleRowsFromHtml -HTML $HTML
     }
     $skippedVisible = 0
+    $skippedReportField = 0
     if ($filterVisibleOnly -and $visibilityMap.Count -gt 0) {
         $allInMap = @($visibilityMap.Keys).Count
         $visInMap = @($visibilityMap.Values | Where-Object { $_ }).Count
         Write-Verbose "Ticket $ticketID : mapa visibilidade $visInMap visivel(is) / $allInMap artigo(s) no HTML"
+    }
+    if ($filterReportField -and $reportFieldMap.Count -gt 0) {
+        $repInMap = @($reportFieldMap.Values | Where-Object { $_ }).Count
+        Write-Verbose "Ticket $ticketID : mapa DynamicField_$($reportFieldSettings.Name)=$($reportFieldSettings.Value): $repInMap / $($reportFieldMap.Count) artigo(s) no HTML"
     }
 
     if ($rowMatches.Count -eq 0) {
@@ -1315,6 +1550,9 @@ function Get-TicketDataFromHtml {
             } else {
                 Write-Warn "Ticket $ticketID : ArticleTable/artigos nao encontrados no HTML - filtro de visibilidade nao pode ser aplicado."
             }
+        }
+        if ($filterReportField) {
+            Write-Warn "Ticket $ticketID : nenhum artigo no HTML para filtrar por DynamicField_$($reportFieldSettings.Name)=$($reportFieldSettings.Value)."
         }
     }
 
@@ -1333,6 +1571,16 @@ function Get-TicketDataFromHtml {
             if (-not $rowVisible) {
                 Write-Verbose "Artigo $aid ignorado (nao marcado como visivel ao cliente) ticket $ticketID"
                 $skippedVisible++
+                continue
+            }
+        }
+        if ($filterReportField) {
+            $forReport = Test-ArticleMarkedForReport -ZoomHtml $HTML -ArticleId $aid -Client $client `
+                -TicketId $ticketID -ChallengeToken $token -ReportMap $reportFieldMap `
+                -FieldName $reportFieldSettings.Name -ExpectedValue $reportFieldSettings.Value
+            if (-not $forReport) {
+                Write-Verbose "Artigo $aid ignorado (DynamicField_$($reportFieldSettings.Name) <> $($reportFieldSettings.Value)) ticket $ticketID"
+                $skippedReportField++
                 continue
             }
         }
@@ -1357,16 +1605,20 @@ function Get-TicketDataFromHtml {
             Start-Sleep -Milliseconds $sleepMs
         } catch { Write-Verbose "Erro ao obter artigo $aid para ticket $ticketID" }
     }
-    if ($filterVisibleOnly -and $rowMatches.Count -gt 0 -and $articles.Count -eq 0) {
+    if ($filterVisibleOnly -and $rowMatches.Count -gt 0 -and $articles.Count -eq 0 -and -not $filterReportField) {
         Write-Verbose "Ticket $ticketID : $($rowMatches.Count) artigo(s) na tela, 0 visiveis ao cliente ($skippedVisible ignorados). Marque ""Ficar visivel para o Cliente"" ou desative o filtro no menu 5."
+    }
+    if ($filterReportField -and $rowMatches.Count -gt 0 -and $articles.Count -eq 0) {
+        Write-Verbose "Ticket $ticketID : $($rowMatches.Count) artigo(s) na tela, 0 com DynamicField_$($reportFieldSettings.Name)=$($reportFieldSettings.Value) ($skippedReportField ignorados). Marque ""Enviar para relatorio"" ao criar a nota (AgentTicketNote) ou desative o filtro no menu 5."
     }
     $articles.Reverse()
     $ticketObj = [TicketData]::new($numero, $estado, $criado, $cliente, $unidade, $articles)
     if ($PassThruStats) {
         return [PSCustomObject]@{
-            Ticket          = $ticketObj
-            Exported        = $articles.Count
-            SkippedInternal = $skippedVisible
+            Ticket             = $ticketObj
+            Exported           = $articles.Count
+            SkippedInternal    = $skippedVisible
+            SkippedReportField = $skippedReportField
         }
     }
     return $ticketObj
@@ -1480,21 +1732,33 @@ function Export-CcoReport {
         [int]$MaxNotesExport = 0,
         [switch]$AbrirRelatorio,
         [switch]$DiagMode,
-        $FilterCustomerVisibleNotesOnly = $null
+        $FilterCustomerVisibleNotesOnly = $null,
+        $FilterNotesByReportDynamicField = $null
     )
 
     $filterOverridden = $PSBoundParameters.ContainsKey('FilterCustomerVisibleNotesOnly')
+    $reportFilterOverridden = $PSBoundParameters.ContainsKey('FilterNotesByReportDynamicField')
     $prevVisibleFilter = Get-CcoFilterVisibleOnly
+    $prevReportFilter = Get-CcoFilterReportDynamicFieldOnly
     if ($filterOverridden) {
         Set-CcoVisibleNotesFilter ([bool]$FilterCustomerVisibleNotesOnly)
+    }
+    if ($reportFilterOverridden) {
+        Set-CcoReportDynamicFieldFilter ([bool]$FilterNotesByReportDynamicField)
     }
 
     try {
 
     if (Get-CcoFilterVisibleOnly) {
-        Write-Host "  Filtro de notas: ATIVO (somente VisibleForCustomer / checkbox visivel ao cliente)" -ForegroundColor Green
+        Write-Host "  Filtro visibilidade: ATIVO (somente VisibleForCustomer / checkbox visivel ao cliente)" -ForegroundColor Green
     } else {
-        Write-Host "  Filtro de notas: DESLIGADO (todas as notas serao exportadas)" -ForegroundColor Yellow
+        Write-Host "  Filtro visibilidade: DESLIGADO" -ForegroundColor Yellow
+    }
+    if (Get-CcoFilterReportDynamicFieldOnly) {
+        $rf = Get-CcoArticleReportDynamicFieldSettings
+        Write-Host ("  Filtro relatorio: ATIVO (DynamicField_" + $rf.Name + "=" + $rf.Value + " / Enviar para relatorio)") -ForegroundColor Green
+    } else {
+        Write-Host "  Filtro relatorio: DESLIGADO (todas as notas passam no criterio DynamicField)" -ForegroundColor Yellow
     }
 
     $now = Get-Date
@@ -1510,6 +1774,7 @@ function Export-CcoReport {
     Write-Verbose "Cache: $EstadoFile"
     Write-Verbose "MaxNotesExport (TXT): $(if ($MaxNotesExport -gt 0) { $MaxNotesExport } else { 'todas' })"
     Write-Verbose "FilterCustomerVisibleNotesOnly: $(Get-CcoFilterVisibleOnly)"
+    Write-Verbose "FilterNotesByReportDynamicField: $(Get-CcoFilterReportDynamicFieldOnly)"
 
     $client = [OtrsClient]::new($BaseURL, $RetryMax)
     $client.Login($Username, $Password)
@@ -1532,11 +1797,14 @@ function Export-CcoReport {
 
         $diagMapPath = Join-Path $OutputDir "diag_artigos_$diagId.txt"
         $mapLines = [System.Collections.Generic.List[string]]::new()
+        $rfDiag = Get-CcoArticleReportDynamicFieldSettings
+        $repMap = Get-ArticleReportFieldMapFromHtml -HTML $diagMain -FieldName $rfDiag.Name -ExpectedValue $rfDiag.Value
         foreach ($row in (Get-TicketArticleRowsFromHtml $diagMain)) {
             $vis = Test-ArticleRowVisibleForCustomer -RowTagAttributes $row.RowTag -RowHtml $row.RowHtml
             $cls = Get-HtmlClassAttributeValue $row.RowTag
             if (-not $cls -and $row.RowHtml -match '(?i)class\s*=\s*"([^"]*WidgetSimple[^"]*)"') { $cls = $Matches[1] }
-            $mapLines.Add(("ArticleID={0}  exportar={1}  classes={2}" -f $row.ArticleId, $(if ($vis) { 'SIM' } else { 'NAO' }), $cls))
+            $rep = if ($repMap.ContainsKey($row.ArticleId)) { if ($repMap[$row.ArticleId]) { 'SIM' } else { 'NAO' } } else { '?' }
+            $mapLines.Add(("ArticleID={0}  visivel_cliente={1}  enviar_relatorio={2}  classes={3}" -f $row.ArticleId, $(if ($vis) { 'SIM' } else { 'NAO' }), $rep, $cls))
         }
         $mapLines | Out-File $diagMapPath -Encoding UTF8
         Write-Host "[DIAG] Mapa ArticleID -> visivel: $diagMapPath" -ForegroundColor Yellow
@@ -1571,8 +1839,14 @@ function Export-CcoReport {
 
     $estadoPath = Resolve-CcoEstadoFilePath -EstadoFile $EstadoFile -OutputDir $OutputDir
     $filterLogLines = [System.Collections.Generic.List[string]]::new()
-    if (Get-CcoFilterVisibleOnly) {
-        [void]$filterLogLines.Add(('Inicio export: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' | FilterCustomerVisibleNotesOnly=true'))
+    if (Get-CcoAnyActiveNoteFilter) {
+        $logParts = @()
+        if (Get-CcoFilterVisibleOnly) { $logParts += 'FilterCustomerVisibleNotesOnly=true' }
+        if (Get-CcoFilterReportDynamicFieldOnly) {
+            $rf = Get-CcoArticleReportDynamicFieldSettings
+            $logParts += ('FilterNotesByReportDynamicField=true DynamicField_' + $rf.Name + '=' + $rf.Value)
+        }
+        [void]$filterLogLines.Add(('Inicio export: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' | ' + ($logParts -join ' | ')))
         Clear-CcoTicketCache $estadoPath
         Write-Info ('Cache removido: ' + $estadoPath)
     }
@@ -1600,14 +1874,17 @@ function Export-CcoReport {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     $emptyVisibleTickets = 0
+    $emptyReportFieldTickets = 0
     $totalNotesExported = 0
     $totalNotesSkippedInternal = 0
+    $totalNotesSkippedReportField = 0
+    $usePassThruStats = (Get-CcoFilterVisibleOnly) -or (Get-CcoFilterReportDynamicFieldOnly)
 
     foreach ($tid in $allIds) {
         $pct = if ($allIds.Count -gt 0) { (($httpCount + $cacheHits) / $allIds.Count * 100) } else { 0 }
         Write-Progress -Activity "Processando tickets" -Status "Ticket $tid" -PercentComplete $pct
 
-        if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds -and -not (Get-CcoFilterVisibleOnly)) {
+        if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds -and -not (Get-CcoAnyActiveNoteFilter)) {
             Write-Verbose "TID $tid - CACHE"
             $ticket = $cache.GetCachedTicket($tid)
             $resolvidos.Add($ticket)
@@ -1623,7 +1900,7 @@ function Export-CcoReport {
                 Get-OtrsTicketZoomHtmlAllPages -Client $client -TicketID $tid
             }
             $parseStats = $null
-            if (Get-CcoFilterVisibleOnly) {
+            if ($usePassThruStats) {
                 $parseStats = Get-TicketDataFromHtml -HTML $html -ticketID $tid -client $client `
                     -maxArticles $MaxArticles -fetchLimit $FetchLimit -sleepMs $SleepArticleMs -PassThruStats
             } else {
@@ -1634,6 +1911,7 @@ function Export-CcoReport {
                 $ticket = $parseStats.Ticket
                 $totalNotesExported += $parseStats.Exported
                 $totalNotesSkippedInternal += $parseStats.SkippedInternal
+                $totalNotesSkippedReportField += $parseStats.SkippedReportField
             }
             if (-not $ticket) {
                 Write-Warning "Nao foi possivel extrair dados do ticket $tid"
@@ -1644,11 +1922,20 @@ function Export-CcoReport {
                 $visStats = Get-OtrsArticleVisibilityStatsFromHtml $html
                 Write-Warn ("Ticket $tid : 0 notas exportadas. No HTML: $($visStats.TotalRows) artigo(s), $($visStats.Visible) com VisibleForCustomer, $($visStats.NotVisible) internas.")
             }
-            if (Get-CcoFilterVisibleOnly) {
+            if ((Get-CcoFilterReportDynamicFieldOnly) -and $ticket.Articles.Count -eq 0) {
+                $emptyReportFieldTickets++
+                $rf = Get-CcoArticleReportDynamicFieldSettings
+                $repStats = Get-OtrsArticleReportFieldStatsFromHtml -HTML $html -FieldName $rf.Name -ExpectedValue $rf.Value
+                Write-Warn ("Ticket $tid : 0 notas exportadas. No HTML: $($repStats.TotalRows) artigo(s), $($repStats.ForReport) com DynamicField_$($rf.Name)=$($rf.Value), $($repStats.NotForReport) sem marcacao.")
+            }
+            if ($usePassThruStats) {
                 $expN = if ($parseStats) { $parseStats.Exported } else { $ticket.Articles.Count }
-                $skipN = if ($parseStats) { $parseStats.SkippedInternal } else { 0 }
+                $skipVis = if ($parseStats) { $parseStats.SkippedInternal } else { 0 }
+                $skipRep = if ($parseStats) { $parseStats.SkippedReportField } else { 0 }
                 $visStats = Get-OtrsArticleVisibilityStatsFromHtml $html
-                $line = "TicketID=$tid exportadas=$expN ignoradas_internas=$skipN html_linhas=$($visStats.TotalRows) visiveis=$($visStats.Visible) nao_visiveis=$($visStats.NotVisible)"
+                $rf = Get-CcoArticleReportDynamicFieldSettings
+                $repStats = Get-OtrsArticleReportFieldStatsFromHtml -HTML $html -FieldName $rf.Name -ExpectedValue $rf.Value
+                $line = "TicketID=$tid exportadas=$expN ignoradas_visibilidade=$skipVis ignoradas_relatorio=$skipRep html_linhas=$($visStats.TotalRows) visiveis=$($visStats.Visible) enviar_relatorio=$($repStats.ForReport)"
                 [void]$filterLogLines.Add($line)
                 Write-Verbose $line
             }
@@ -1688,11 +1975,21 @@ function Export-CcoReport {
     if ((Get-CcoFilterVisibleOnly) -and $emptyVisibleTickets -gt 0) {
         Write-Warn ("$emptyVisibleTickets chamado(s) sem notas visiveis ao cliente. Confirme o checkbox ""Ficar visivel para o Cliente"" no OTRS ou desative o filtro no menu 5.")
     }
-    if (Get-CcoFilterVisibleOnly) {
-        Write-Host ("  Resumo filtro: $($totalNotesExported) nota(s) exportada(s), $($totalNotesSkippedInternal) nota(s) interna(s) ignorada(s).") -ForegroundColor Cyan
-        Write-Info 'Filtro: CustomerVisibilityFilter=1 na sessao OTRS (se disponivel) + classes VisibleForCustomer na ArticleTable.'
-        Write-Info 'Se ainda vierem notas internas: opcao 8 ou -DiagMode -> diag_artigos_*.txt; confira Ticket::Frontend::TicketArticleFilter no Znuny.'
-        [void]$filterLogLines.Add(('Fim: exportadas=' + $totalNotesExported + ' ignoradas=' + $totalNotesSkippedInternal))
+    if ((Get-CcoFilterReportDynamicFieldOnly) -and $emptyReportFieldTickets -gt 0) {
+        $rf = Get-CcoArticleReportDynamicFieldSettings
+        Write-Warn ("$emptyReportFieldTickets chamado(s) sem notas com DynamicField_$($rf.Name)=$($rf.Value). Marque ""Enviar para relatorio"" ao criar a nota (AgentTicketNote) ou desative o filtro no menu 5.")
+    }
+    if ($usePassThruStats) {
+        Write-Host ("  Resumo filtro: $($totalNotesExported) nota(s) exportada(s), $($totalNotesSkippedInternal) ignorada(s) por visibilidade, $($totalNotesSkippedReportField) ignorada(s) por DynamicField relatorio.") -ForegroundColor Cyan
+        if (Get-CcoFilterVisibleOnly) {
+            Write-Info 'Visibilidade: CustomerVisibilityFilter=1 na sessao OTRS (se disponivel) + classes VisibleForCustomer na ArticleTable.'
+        }
+        if (Get-CcoFilterReportDynamicFieldOnly) {
+            $rf = Get-CcoArticleReportDynamicFieldSettings
+            Write-Info ("Relatorio: somente artigos com DynamicField_$($rf.Name)=$($rf.Value) (checkbox Enviar para relatorio / AgentTicketNote).")
+        }
+        Write-Info 'Diagnostico: -DiagMode -> diag_artigos_*.txt (visivel_cliente + enviar_relatorio).'
+        [void]$filterLogLines.Add(('Fim: exportadas=' + $totalNotesExported + ' ignoradas_vis=' + $totalNotesSkippedInternal + ' ignoradas_rel=' + $totalNotesSkippedReportField))
         Write-CcoExportFilterLog -OutputDir $OutputDir -Lines $filterLogLines
     }
 
@@ -1708,6 +2005,9 @@ function Export-CcoReport {
     } finally {
         if ($filterOverridden) {
             Set-CcoVisibleNotesFilter $prevVisibleFilter
+        }
+        if ($reportFilterOverridden) {
+            Set-CcoReportDynamicFieldFilter $prevReportFilter
         }
     }
 }
@@ -1822,6 +2122,7 @@ function Invoke-GerarTxt {
     Write-Info ("Usuario : " + $Cfg.Username)
     Write-Info ("Saida   : " + $Cfg.OutputPath)
     Write-Info (Get-VisibleNotesFilterLabel ([bool]$Cfg.FilterCustomerVisibleNotesOnly))
+    Write-Info (Get-ReportDynamicFieldFilterLabel ([bool]$Cfg.FilterNotesByReportDynamicField))
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
@@ -1833,16 +2134,17 @@ function Invoke-GerarTxt {
     }
     Sync-CcoConfigFromCfg $Cfg
     $params = @{
-        BaseURL                        = $Cfg.BaseURL
-        Username                       = $Cfg.Username
-        Password                       = $Cfg.Password
-        SearchPath                     = $Cfg.SearchPath
-        EstadoFile                     = $Cfg.EstadoFile
-        OutputDir                      = $Cfg.OutputPath
-        AbrirRelatorio                 = $false
-        DiagMode                       = $false
-        MaxNotesExport                 = $maxNotesExport
-        FilterCustomerVisibleNotesOnly = [bool]$Cfg.FilterCustomerVisibleNotesOnly
+        BaseURL                         = $Cfg.BaseURL
+        Username                        = $Cfg.Username
+        Password                        = $Cfg.Password
+        SearchPath                      = $Cfg.SearchPath
+        EstadoFile                      = $Cfg.EstadoFile
+        OutputDir                       = $Cfg.OutputPath
+        AbrirRelatorio                  = $false
+        DiagMode                        = $false
+        MaxNotesExport                  = $maxNotesExport
+        FilterCustomerVisibleNotesOnly  = [bool]$Cfg.FilterCustomerVisibleNotesOnly
+        FilterNotesByReportDynamicField = [bool]$Cfg.FilterNotesByReportDynamicField
     }
     try {
         Export-CcoReport @params
@@ -1876,6 +2178,7 @@ function Invoke-GerarJson {
     Write-Info ("Usuario : " + $Cfg.Username)
     Write-Info ("Saida   : " + $Cfg.OutputPath)
     Write-Info (Get-VisibleNotesFilterLabel ([bool]$Cfg.FilterCustomerVisibleNotesOnly))
+    Write-Info (Get-ReportDynamicFieldFilterLabel ([bool]$Cfg.FilterNotesByReportDynamicField))
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
@@ -1887,16 +2190,17 @@ function Invoke-GerarJson {
     }
     Sync-CcoConfigFromCfg $Cfg
     $params = @{
-        BaseURL                        = $Cfg.BaseURL
-        Username                       = $Cfg.Username
-        Password                       = $Cfg.Password
-        SearchPath                     = $Cfg.SearchPath
-        EstadoFile                     = $Cfg.EstadoFile
-        OutputDir                      = $Cfg.OutputPath
-        AbrirRelatorio                 = $false
-        DiagMode                       = $false
-        MaxNotesExport                 = $maxNotesExport
-        FilterCustomerVisibleNotesOnly = [bool]$Cfg.FilterCustomerVisibleNotesOnly
+        BaseURL                         = $Cfg.BaseURL
+        Username                        = $Cfg.Username
+        Password                        = $Cfg.Password
+        SearchPath                      = $Cfg.SearchPath
+        EstadoFile                      = $Cfg.EstadoFile
+        OutputDir                       = $Cfg.OutputPath
+        AbrirRelatorio                  = $false
+        DiagMode                        = $false
+        MaxNotesExport                  = $maxNotesExport
+        FilterCustomerVisibleNotesOnly  = [bool]$Cfg.FilterCustomerVisibleNotesOnly
+        FilterNotesByReportDynamicField = [bool]$Cfg.FilterNotesByReportDynamicField
     }
     try {
         Export-CcoReport @params
@@ -1941,24 +2245,87 @@ function Invoke-GerarCriticosVisivelCliente {
     }
     Sync-CcoConfigFromCfg $Cfg
     Set-CcoVisibleNotesFilter $true
+    Set-CcoReportDynamicFieldFilter $false
     $cachePath = Resolve-CcoEstadoFilePath -EstadoFile $Cfg.EstadoFile -OutputDir $Cfg.OutputPath
     Clear-CcoTicketCache $cachePath
     $params = @{
-        BaseURL                        = $Cfg.BaseURL
-        Username                       = $Cfg.Username
-        Password                       = $Cfg.Password
-        SearchPath                     = $Cfg.SearchPath
-        EstadoFile                     = $Cfg.EstadoFile
-        OutputDir                      = $Cfg.OutputPath
-        AbrirRelatorio                 = $false
-        DiagMode                       = $false
-        MaxNotesExport                 = $maxNotesExport
-        FilterCustomerVisibleNotesOnly = $true
+        BaseURL                         = $Cfg.BaseURL
+        Username                        = $Cfg.Username
+        Password                        = $Cfg.Password
+        SearchPath                      = $Cfg.SearchPath
+        EstadoFile                      = $Cfg.EstadoFile
+        OutputDir                       = $Cfg.OutputPath
+        AbrirRelatorio                  = $false
+        DiagMode                        = $false
+        MaxNotesExport                  = $maxNotesExport
+        FilterCustomerVisibleNotesOnly  = $true
+        FilterNotesByReportDynamicField = $false
     }
     try {
         Export-CcoReport @params
         Write-Host ""
         Write-OK 'Relatorio de criticos gerado (somente notas visiveis ao cliente).'
+        $jsonMeta = Export-RelatorioCcoJsonFile $Cfg -MaxNotesExport $maxNotesExport
+        if ($jsonMeta) {
+            Write-OK ("Resumo JSON: " + $jsonMeta.Path)
+            Write-Info ("Ativos: " + $jsonMeta.TotalAtivos + "   Resolvidos: " + $jsonMeta.TotalResolvidos)
+        } else {
+            Write-Warn 'Cache nao encontrado apos export; JSON de resumo nao foi gerado.'
+        }
+    } catch {
+        Write-Host ""
+        Write-Err ("Erro: " + $_)
+    }
+    Pause-Screen
+}
+
+# =============================================================================
+# Criticos: somente notas com DynamicField Enviar para relatorio = Sim
+# (equivalente ao POST AgentTicketNote com DynamicField_Enviarpararelatorio=Sim)
+# =============================================================================
+
+function Invoke-GerarCriticosEnviarRelatorio {
+    param([hashtable]$Cfg, [string]$ExportScript)
+    Write-Banner
+    Write-Centered "-- CRITICOS: ENVIAR PARA RELATORIO --" 'White'
+    Write-Host ""
+    Write-Info ("Servidor: " + $Cfg.BaseURL)
+    Write-Info ("Perfil KPI (criticos): " + $Cfg.SearchPath)
+    Write-Info (Get-ReportDynamicFieldFilterLabel $true)
+    Write-Warn 'Somente notas marcadas com DynamicField_Enviarpararelatorio=Sim (checkbox ""Enviar para relatorio"" / AgentTicketNote).'
+    Write-Info 'Filtro de visibilidade ao cliente DESLIGADO nesta exportacao (notas do script shell interceptador entram mesmo se internas).'
+    Write-Info 'O cache estado_chamados.json sera apagado automaticamente nesta exportacao.'
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+    $maxNotesExport = Read-NotasExportOption
+    try {
+        Ensure-ExportScript $ExportScript
+    } catch {
+        Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
+    }
+    Sync-CcoConfigFromCfg $Cfg
+    Set-CcoVisibleNotesFilter $false
+    Set-CcoReportDynamicFieldFilter $true
+    $cachePath = Resolve-CcoEstadoFilePath -EstadoFile $Cfg.EstadoFile -OutputDir $Cfg.OutputPath
+    Clear-CcoTicketCache $cachePath
+    $params = @{
+        BaseURL                         = $Cfg.BaseURL
+        Username                        = $Cfg.Username
+        Password                        = $Cfg.Password
+        SearchPath                      = $Cfg.SearchPath
+        EstadoFile                      = $Cfg.EstadoFile
+        OutputDir                       = $Cfg.OutputPath
+        AbrirRelatorio                  = $false
+        DiagMode                        = $false
+        MaxNotesExport                  = $maxNotesExport
+        FilterCustomerVisibleNotesOnly  = $false
+        FilterNotesByReportDynamicField = $true
+    }
+    try {
+        Export-CcoReport @params
+        Write-Host ""
+        Write-OK 'Relatorio de criticos gerado (somente notas Enviar para relatorio = Sim).'
         $jsonMeta = Export-RelatorioCcoJsonFile $Cfg -MaxNotesExport $maxNotesExport
         if ($jsonMeta) {
             Write-OK ("Resumo JSON: " + $jsonMeta.Path)
@@ -2229,8 +2596,8 @@ function Show-VisualizadorCompleto {
         if (-not (Test-Path $cachePath)) { return }
     }
 
-    if ($Cfg.FilterCustomerVisibleNotesOnly) {
-        Write-Warn 'Cache offline: pode conter notas de exportacao antiga sem filtro. Use opcao 1, 2 ou 8 para atualizar, ou apague estado_chamados.json.'
+    if ($Cfg.FilterCustomerVisibleNotesOnly -or $Cfg.FilterNotesByReportDynamicField) {
+        Write-Warn 'Cache offline: pode conter notas de exportacao antiga sem filtro. Use opcao 1, 2, 8 ou 9 para atualizar, ou apague estado_chamados.json.'
     }
 
     try {
@@ -3683,6 +4050,13 @@ function Show-Configuracoes {
     $visDef = if ($Cfg.FilterCustomerVisibleNotesOnly) { 's' } else { 'n' }
     $visIn = Read-Field "OTRS: so notas visiveis ao cliente (checkbox Ficar visivel para o Cliente) (s/N)" $visDef
     $Cfg.FilterCustomerVisibleNotesOnly = ($visIn -match '^[Ss]')
+    $repDef = if ($Cfg.FilterNotesByReportDynamicField) { 's' } else { 'n' }
+    $repIn = Read-Field "OTRS: so notas Enviar para relatorio (DynamicField_Enviarpararelatorio=Sim) (s/N)" $repDef
+    $Cfg.FilterNotesByReportDynamicField = ($repIn -match '^[Ss]')
+    if (-not $Cfg.ArticleDynamicFieldReportName) { $Cfg.ArticleDynamicFieldReportName = 'Enviarpararelatorio' }
+    if (-not $Cfg.ArticleDynamicFieldReportValue) { $Cfg.ArticleDynamicFieldReportValue = 'Sim' }
+    $Cfg.ArticleDynamicFieldReportName = Read-Field "OTRS: nome do campo dinamico de artigo (sem prefixo DynamicField_)" $Cfg.ArticleDynamicFieldReportName
+    $Cfg.ArticleDynamicFieldReportValue = Read-Field "OTRS: valor exigido para incluir a nota no relatorio" $Cfg.ArticleDynamicFieldReportValue
     if (-not $Cfg.HubEncaminharPath) { $Cfg.HubEncaminharPath = 'api/relatorio' }
     if (-not $Cfg.HubApiRelatorioPath) { $Cfg.HubApiRelatorioPath = 'api/relatorio' }
     $Cfg.HubBaseURL = Read-Field "URL base do Hub (relatorio CCO)" $Cfg.HubBaseURL
@@ -3762,7 +4136,7 @@ function Show-MainMenu {
         $hostDisplay = try { ([uri]$Cfg.BaseURL).Host } catch { $Cfg.BaseURL }
 
         Write-Banner
-        Write-StatusBar $Cfg.Username $hostDisplay $cfgStatus $Cfg.FilterCustomerVisibleNotesOnly
+        Write-StatusBar $Cfg.Username $hostDisplay $cfgStatus $Cfg.FilterCustomerVisibleNotesOnly $Cfg.FilterNotesByReportDynamicField
         Write-Centered "-- MENU PRINCIPAL --" 'White'
         Write-Host ""
 
@@ -3771,10 +4145,11 @@ function Show-MainMenu {
         Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS tempo real, criticos visiveis ou cache'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
-        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca KPI, filtro IsVisibleForCustomer, Hub'
+        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca KPI, filtros de notas, Hub'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
         Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'API + HTML; WebDriver no Gerador CCO'
         Write-MenuOpt '8' 'Criticos visiveis'       'Green'    'Perfil KPI + so notas ""Ficar visivel para o Cliente""'
+        Write-MenuOpt '9' 'Criticos relatorio'      'Green'    'Perfil KPI + DynamicField_Enviarpararelatorio=Sim'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
@@ -3792,6 +4167,7 @@ function Show-MainMenu {
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
             '7' { Invoke-SyncHub $Cfg $ExportScript }
             '8' { Invoke-GerarCriticosVisivelCliente $Cfg $ExportScript }
+            '9' { Invoke-GerarCriticosEnviarRelatorio $Cfg $ExportScript }
             '0' {
                 Write-Banner
                 Write-Centered "Ate logo!" 'DarkCyan'
