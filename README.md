@@ -78,7 +78,7 @@ Após preencher credenciais, use a opção **9** (Críticos relatório) para o m
 |------|----------------|------------------------|
 | **Adicionar nota** (popup) | `AgentTicketNote` — campo `DynamicField_Enviarpararelatorio=Sim` (**Enviar para relatório**) | **Sim** — ao enviar a nota (como no script curl: `Subaction=Store`, `DynamicField_Enviarpararelatorio=Sim`). |
 | **Adicionar nota** (popup) | `AgentTicketNote` — checkbox `IsVisibleForCustomer` | Opcional — filtro separado (`FilterCustomerVisibleNotesOnly`). |
-| **Detalhe do chamado** | `AgentTicketZoom` — widget do artigo (`ArticleMetaFields`) | **Sim** — `<label>Enviar para relatório</label><p class="Value">Sim</p>` dentro do bloco `Article{ArticleID}`. |
+| **Detalhe do chamado** | `AgentTicketZoom` — widget do artigo (`ArticleMetaFields`) | **Sim** — `<label>Enviar para relatório</label><p class="Value">Sim</p>`. Na visão **tabela de artigos** (todos expandidos), o meta pode não vir no HTML inicial; o script busca via `Subaction=ArticleUpdate` com **`Count`** (número da linha `RowN`). |
 
 ### Onde o OTRS grava “visível para o cliente”
 

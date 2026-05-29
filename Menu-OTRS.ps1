@@ -526,6 +526,16 @@ class OtrsClient {
 
     # Widget do artigo (ArticleMetaFields) quando a visao AgentTicketZoom mostra um artigo por vez.
     [string] GetArticleUpdateHtml([string]$ticketID, [string]$articleID, [string]$challengeToken, [int]$count = 0) {
+        if ($count -gt 0) {
+            $getUri = "$($this.BaseURL)/index.pl?Action=AgentTicketZoom;Subaction=ArticleUpdate;TicketID=$ticketID;ArticleID=$articleID;Count=$count"
+            try {
+                $getResp = $this.InvokeWithRetry($getUri)
+                $getHtml = $this.GetResponseText($getResp)
+                if ($getHtml -and $getHtml.Length -gt 50) { return $getHtml }
+            } catch {
+                Write-Verbose "ArticleUpdate GET falhou ticket $ticketID artigo $articleID count $count : $_"
+            }
+        }
         $uri = "$($this.BaseURL)/index.pl"
         $body = @{
             Action    = 'AgentTicketZoom'
@@ -922,6 +932,67 @@ function Get-ArticleHtmlScopeFromZoomHtml {
     return ''
 }
 
+function Get-ArticleCountFromRowHtml {
+    param(
+        [string]$RowTag = '',
+        [string]$RowHtml = ''
+    )
+    $src = ($RowTag + $RowHtml)
+    if (-not $src) { return 0 }
+    if (($m = [regex]::Match($src, 'Subaction=ArticleUpdate(?:;|%3B)Count=(\d+)')).Success) {
+        return [int]$m.Groups[1].Value
+    }
+    if (($m = [regex]::Match($RowTag, '\bid=["'']Row(\d+)["'']')).Success) {
+        return [int]$m.Groups[1].Value
+    }
+    if (($m = [regex]::Match($RowHtml, '(?is)<td[^>]*class="[^"]*\bNo\b[^"]*"[^>]*>\s*(\d+)')).Success) {
+        return [int]$m.Groups[1].Value
+    }
+    if (($m = [regex]::Match($RowHtml, 'class="SortData"[^>]*value="(\d+)"')).Success) {
+        return [int]$m.Groups[1].Value
+    }
+    return 0
+}
+
+function Test-ArticleReportValueMatches {
+    param(
+        [string]$ActualValue,
+        [string]$ExpectedValue
+    )
+    if (-not $ActualValue) { return $false }
+    $a = ($ActualValue -replace '\s+', ' ').Trim().ToLowerInvariant()
+    $e = ($ExpectedValue -replace '\s+', ' ').Trim().ToLowerInvariant()
+    if ($a -ceq $e) { return $true }
+    if ($e -eq 'sim' -and $a -in @('sim', '1', 'yes', 'true', 'y', 's')) { return $true }
+    if ($e -eq 'nao' -and $a -in @('nao', 'não', '0', 'no', 'false', 'n')) { return $true }
+    return $false
+}
+
+function Get-ArticleReportFieldValueFromHtml {
+    param(
+        [string]$ArticleHtml,
+        [string]$FieldName
+    )
+    if (-not $ArticleHtml -or -not $FieldName) { return '' }
+    $fnEsc = [regex]::Escape($FieldName)
+    $extractPatterns = @(
+        "(?is)<label[^>]*>\s*[^<]*$fnEsc[^<]*</label>\s*<(?:p|span)[^>]*class\s*=\s*[""']Value[""'][^>]*(?:title\s*=\s*[""']([^""']+)[""'])?[^>]*>\s*([^<]+)\s*</(?:p|span)>",
+        "(?is)<label[^>]*>\s*[^<]*Enviar[^<]*relat[^<]*</label>\s*<(?:p|span)[^>]*class\s*=\s*[""']Value[""'][^>]*(?:title\s*=\s*[""']([^""']+)[""'])?[^>]*>\s*([^<]+)\s*</(?:p|span)>",
+        "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*\bvalue\s*=\s*[""']([^""']+)[""']",
+        "(?is)DynamicField_$fnEsc[^>]*\bvalue\s*=\s*[""']([^""']+)[""']",
+        "(?is)DynamicField_$fnEsc[\s\S]{0,400}?<option[^>]*\bselected\b[^>]*>\s*([^<]+?)\s*</option>"
+    )
+    foreach ($p in $extractPatterns) {
+        if (($m = [regex]::Match($ArticleHtml, $p)).Success) {
+            $val = if ($m.Groups.Count -ge 3 -and $m.Groups[2].Value.Trim()) { $m.Groups[2].Value.Trim() }
+                   elseif ($m.Groups[1].Value.Trim()) { $m.Groups[1].Value.Trim() }
+                   else { '' }
+            if ($val) { return $val }
+        }
+    }
+    return ''
+}
+
 function Test-ArticleHtmlHasReportDynamicField {
     param(
         [string]$ArticleHtml,
@@ -930,41 +1001,36 @@ function Test-ArticleHtmlHasReportDynamicField {
     )
     if (-not $ArticleHtml -or -not $FieldName -or -not $ExpectedValue) { return $false }
 
-    # Decodificar entidades HTML antes de comparar (cobre relat&oacute;rio, Sim etc.)
     try {
         $decodedHtml = [System.Net.WebUtility]::HtmlDecode($ArticleHtml)
     } catch {
         $decodedHtml = $ArticleHtml
     }
 
-    $fnEsc  = [regex]::Escape($FieldName)
-    $valEsc = [regex]::Escape($ExpectedValue)
+    foreach ($src in @($ArticleHtml, $decodedHtml) | Select-Object -Unique) {
+        $found = Get-ArticleReportFieldValueFromHtml -ArticleHtml $src -FieldName $FieldName
+        if ($found -and (Test-ArticleReportValueMatches -ActualValue $found -ExpectedValue $ExpectedValue)) {
+            return $true
+        }
+    }
 
-    # Tambem monta variante do nome do campo com espacos (ex.: "Enviarpararelatorio" -> "Enviar para relatorio")
-    # Znuny exibe o label com o titulo original do campo, nao o nome interno sem espacos.
-    $fnLabel = $FieldName -replace '(?<=[a-z])(?=[A-Z])', ' '  # CamelCase -> espacos
+    $fnEsc = [regex]::Escape($FieldName)
+    $valEsc = [regex]::Escape($ExpectedValue)
+    $fnLabel = $FieldName -replace '(?<=[a-z])(?=[A-Z])', ' '
     $fnLabelEsc = [regex]::Escape($fnLabel)
 
     $patterns = @(
-        # 1. Input/hidden com name=DynamicField_X e value=Y
         "(?is)DynamicField_$fnEsc[^>]*\bvalue\s*=\s*[""']$valEsc[""']",
         "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*\bvalue\s*=\s*[""']$valEsc[""']",
-        # 2. Select com option selected
         "(?is)name\s*=\s*[""']DynamicField_$fnEsc[""'][^>]*>\s*$valEsc\s*<",
         "(?is)DynamicField_$fnEsc[\s\S]{0,400}?<option[^>]*\bselected\b[^>]*>\s*$valEsc\s*</option>",
-        # 3. Label pelo nome interno (sem espacos) + <p class="Value">
-        "(?is)<label[^>]*>\s*[^<]*$fnEsc[^<]*</label>\s*(?:<[^>]+>\s*)*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
-        # 4. Label pelo nome com espacos (como Znuny exibe: "Enviar para relatorio")
-        "(?is)<label[^>]*>\s*[^<]*$fnLabelEsc[^<]*</label>\s*(?:<[^>]+>\s*)*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
-        # 5. Label generico "Enviar.*relat" (cobre variacoes de acentuacao ja decodificada)
-        "(?is)<label[^>]*>\s*[^<]*Enviar[^<]*relat[^<]*</label>\s*(?:<[^>]+>\s*)*<p[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</p>",
-        # 6. Container ArticleField com id/data contendo o nome do campo + valor visivel
+        "(?is)<label[^>]*>\s*[^<]*$fnEsc[^<]*</label>\s*(?:<[^>]+>\s*)*<(?:p|span)[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</(?:p|span)>",
+        "(?is)<label[^>]*>\s*[^<]*$fnLabelEsc[^<]*</label>\s*(?:<[^>]+>\s*)*<(?:p|span)[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</(?:p|span)>",
+        "(?is)<label[^>]*>\s*[^<]*Enviar[^<]*relat[^<]*</label>\s*(?:<[^>]+>\s*)*<(?:p|span)[^>]*class\s*=\s*[""']Value[""'][^>]*>\s*$valEsc\s*</(?:p|span)>",
         "(?is)(?:id|data-field)\s*=\s*[""'][^""']*DynamicField_$fnEsc[^""']*[""'][^>]*>[\s\S]{0,600}?>\s*$valEsc\s*<",
-        # 7. Fallback: qualquer ocorrencia do valor esperado proximo ao nome do campo (dentro de 200 chars)
         "(?is)DynamicField_$fnEsc[\s\S]{0,200}$valEsc"
     )
 
-    # Testar contra HTML original e decodificado
     foreach ($src in @($ArticleHtml, $decodedHtml) | Select-Object -Unique) {
         foreach ($p in $patterns) {
             if ($src -match $p) { return $true }
@@ -973,22 +1039,62 @@ function Test-ArticleHtmlHasReportDynamicField {
     return $false
 }
 
+function Get-ArticleReportWidgetHtml {
+    param(
+        [string]$ZoomHtml,
+        [string]$ArticleId,
+        [OtrsClient]$Client,
+        [string]$TicketId,
+        [string]$ChallengeToken,
+        [int]$ArticleCount = 0
+    )
+    $cacheKey = $TicketId + ':' + $ArticleId
+    if ($script:ArticleUpdateHtmlCache -and $script:ArticleUpdateHtmlCache.ContainsKey($cacheKey)) {
+        return $script:ArticleUpdateHtmlCache[$cacheKey]
+    }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $scope = Get-ArticleHtmlScopeFromZoomHtml -HTML $ZoomHtml -ArticleId $ArticleId
+    if ($scope) { [void]$parts.Add($scope) }
+    if ($Client -and $TicketId -and $ArticleId) {
+        if (-not $ChallengeToken) { $ChallengeToken = Get-ChallengeTokenFromHtml $ZoomHtml }
+        if ($ChallengeToken) {
+            try {
+                $upd = $Client.GetArticleUpdateHtml($TicketId, $ArticleId, $ChallengeToken, $ArticleCount)
+                if ($upd) { [void]$parts.Add($upd) }
+            } catch {
+                Write-Verbose "ArticleUpdate indisponivel para artigo $ArticleId ticket $TicketId (Count=$ArticleCount) : $_"
+            }
+        } else {
+            Write-Verbose "Ticket $TicketId artigo $ArticleId : sem ChallengeToken para ArticleUpdate (meta Enviar para relatorio)."
+        }
+    }
+    $merged = ($parts | Where-Object { $_ }) -join "`n"
+    if ($script:ArticleUpdateHtmlCache -eq $null) { $script:ArticleUpdateHtmlCache = @{} }
+    $script:ArticleUpdateHtmlCache[$cacheKey] = $merged
+    return $merged
+}
+
 function Get-ArticleReportFieldMapFromHtml {
     param(
         [string]$HTML,
         [string]$FieldName,
-        [string]$ExpectedValue
+        [string]$ExpectedValue,
+        [OtrsClient]$Client = $null,
+        [string]$TicketId = '',
+        [string]$ChallengeToken = ''
     )
     $map = @{}
     if (-not $HTML) { return $map }
     foreach ($row in (Get-TicketArticleRowsFromHtml -HTML $HTML)) {
         if (-not $row.ArticleId) { continue }
-        $scope = Get-ArticleHtmlScopeFromZoomHtml -HTML $HTML -ArticleId $row.ArticleId
-        if (-not $scope) { $scope = $row.RowHtml }
-        if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $scope -FieldName $FieldName -ExpectedValue $ExpectedValue) {
+        $count = Get-ArticleCountFromRowHtml -RowTag $row.RowTag -RowHtml $row.RowHtml
+        $widgetHtml = Get-ArticleReportWidgetHtml -ZoomHtml $HTML -ArticleId $row.ArticleId `
+            -Client $Client -TicketId $TicketId -ChallengeToken $ChallengeToken -ArticleCount $count
+        if (-not $widgetHtml) { $widgetHtml = $row.RowHtml }
+        if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $widgetHtml -FieldName $FieldName -ExpectedValue $ExpectedValue) {
             $map[$row.ArticleId] = $true
         }
-        elseif ($scope -match ("DynamicField_" + [regex]::Escape($FieldName)) -or $scope -match 'ArticleMetaFields') {
+        elseif ($widgetHtml -match ("DynamicField_" + [regex]::Escape($FieldName)) -or $widgetHtml -match 'ArticleMetaFields') {
             $map[$row.ArticleId] = $false
         }
     }
@@ -1004,37 +1110,33 @@ function Test-ArticleMarkedForReport {
         [string]$ChallengeToken,
         [hashtable]$ReportMap,
         [string]$FieldName,
-        [string]$ExpectedValue
+        [string]$ExpectedValue,
+        [int]$ArticleCount = 0
     )
     if ($ReportMap -and $ReportMap.ContainsKey($ArticleId)) {
         return [bool]$ReportMap[$ArticleId]
     }
-    $scope = Get-ArticleHtmlScopeFromZoomHtml -HTML $ZoomHtml -ArticleId $ArticleId
-    if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $scope -FieldName $FieldName -ExpectedValue $ExpectedValue) {
+    $widgetHtml = Get-ArticleReportWidgetHtml -ZoomHtml $ZoomHtml -ArticleId $ArticleId `
+        -Client $Client -TicketId $TicketId -ChallengeToken $ChallengeToken -ArticleCount $ArticleCount
+    if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $widgetHtml -FieldName $FieldName -ExpectedValue $ExpectedValue) {
         if ($ReportMap) { $ReportMap[$ArticleId] = $true }
         return $true
     }
-    if ($scope -and ($scope -match ("DynamicField_" + [regex]::Escape($FieldName)) -or $scope -match 'ArticleMetaFields')) {
+    $rawVal = Get-ArticleReportFieldValueFromHtml -ArticleHtml $widgetHtml -FieldName $FieldName
+    if (-not $rawVal -and $widgetHtml) {
+        try { $rawVal = Get-ArticleReportFieldValueFromHtml -ArticleHtml ([System.Net.WebUtility]::HtmlDecode($widgetHtml)) -FieldName $FieldName } catch {}
+    }
+    if ($rawVal -or ($widgetHtml -match ("DynamicField_" + [regex]::Escape($FieldName))) -or ($widgetHtml -match 'ArticleMetaFields')) {
         if ($ReportMap) { $ReportMap[$ArticleId] = $false }
+        Write-Verbose "Artigo $ArticleId ticket $TicketId : DynamicField_$FieldName='$rawVal' (esperado $ExpectedValue, Count=$ArticleCount)."
+        if ($widgetHtml.Length -gt 0) {
+            $snippet = if ($widgetHtml.Length -gt 600) { $widgetHtml.Substring(0, 600) } else { $widgetHtml }
+            Write-Verbose "Trecho HTML artigo $ArticleId : $snippet"
+        }
         return $false
     }
-    if ($Client -and $ChallengeToken) {
-        try {
-            $upd = $Client.GetArticleUpdateHtml($TicketId, $ArticleId, $ChallengeToken)
-            if (Test-ArticleHtmlHasReportDynamicField -ArticleHtml $upd -FieldName $FieldName -ExpectedValue $ExpectedValue) {
-                if ($ReportMap) { $ReportMap[$ArticleId] = $true }
-                return $true
-            }
-            # Log de diagnostico: exibe trecho do HTML do ArticleUpdate para facilitar ajuste de padroes
-            $updSnippet = if ($upd.Length -gt 600) { $upd.Substring(0, 600) } else { $upd }
-            Write-Verbose "ArticleUpdate artigo $ArticleId ticket $TicketId : campo NAO detectado. Trecho HTML (primeiros 600 chars): $updSnippet"
-            if ($ReportMap) { $ReportMap[$ArticleId] = $false }
-            return $false
-        } catch {
-            Write-Verbose "ArticleUpdate indisponivel para artigo $ArticleId ticket $TicketId : $_"
-        }
-    }
     if ($ReportMap) { $ReportMap[$ArticleId] = $false }
+    Write-Verbose "Artigo $ArticleId ticket $TicketId : campo DynamicField_$FieldName nao encontrado no HTML/ArticleUpdate (Count=$ArticleCount)."
     return $false
 }
 
@@ -1195,9 +1297,10 @@ function Get-ArticleRowFromWidgetAnchorHtml {
     if (-not (($m = [regex]::Match($HTML, $pat)).Success)) { return $null }
     $cls = $m.Groups[1].Value
     return [PSCustomObject]@{
-        RowTag    = ('class="' + $cls + '"')
-        RowHtml   = $m.Value
-        ArticleId = $ArticleId
+        RowTag       = ('class="' + $cls + '"')
+        RowHtml      = $m.Value
+        ArticleId    = $ArticleId
+        ArticleCount = 0
     }
 }
 
@@ -1336,9 +1439,10 @@ function Get-TicketArticleRowsFromHtml {
         if (-not $aid -or $seen.ContainsKey($aid)) { continue }
         $seen[$aid] = $true
         $rows.Add([PSCustomObject]@{
-            RowTag    = $rowTag
-            RowHtml   = $rowHtml
-            ArticleId = $aid
+            RowTag       = $rowTag
+            RowHtml      = $rowHtml
+            ArticleId    = $aid
+            ArticleCount = (Get-ArticleCountFromRowHtml -RowTag $rowTag -RowHtml $rowHtml)
         })
     }
 
@@ -1370,9 +1474,10 @@ function Get-TicketArticleRowsFromHtml {
             if (-not $aid -or $seen.ContainsKey($aid)) { continue }
             $seen[$aid] = $true
             $rows.Add([PSCustomObject]@{
-                RowTag    = ('class="' + $wm.Groups[2].Value + '"')
-                RowHtml   = $wm.Value
-                ArticleId = $aid
+                RowTag       = ('class="' + $wm.Groups[2].Value + '"')
+                RowHtml      = $wm.Value
+                ArticleId    = $aid
+                ArticleCount = 0
             })
         }
     }
@@ -1578,12 +1683,14 @@ function Get-TicketDataFromHtml {
     }
 
     $articles = [System.Collections.Generic.List[object]]::new()
+    $script:ArticleUpdateHtmlCache = @{}
     $filterVisibleOnly = Get-CcoFilterVisibleOnly
     $filterReportField = Get-CcoFilterReportDynamicFieldOnly
     $reportFieldSettings = Get-CcoArticleReportDynamicFieldSettings
     $visibilityMap = if ($filterVisibleOnly) { Get-ArticleVisibilityMapFromHtml $HTML } else { @{} }
     $reportFieldMap = if ($filterReportField) {
-        Get-ArticleReportFieldMapFromHtml -HTML $HTML -FieldName $reportFieldSettings.Name -ExpectedValue $reportFieldSettings.Value
+        Get-ArticleReportFieldMapFromHtml -HTML $HTML -FieldName $reportFieldSettings.Name `
+            -ExpectedValue $reportFieldSettings.Value -Client $client -TicketId $ticketID -ChallengeToken $token
     } else { @{} }
     $rowMatches = if ($filterVisibleOnly -and -not $filterReportField) {
         Get-TicketArticleRowsFromHtml -HTML $HTML -OnlyVisibleForCustomer
@@ -1636,11 +1743,15 @@ function Get-TicketDataFromHtml {
             }
         }
         if ($filterReportField) {
+            $articleCount = 0
+            if ($null -ne $row.ArticleCount -and $row.ArticleCount -gt 0) { $articleCount = [int]$row.ArticleCount }
+            else { $articleCount = Get-ArticleCountFromRowHtml -RowTag $rowTag -RowHtml $rowHtml }
             $forReport = Test-ArticleMarkedForReport -ZoomHtml $HTML -ArticleId $aid -Client $client `
                 -TicketId $ticketID -ChallengeToken $token -ReportMap $reportFieldMap `
-                -FieldName $reportFieldSettings.Name -ExpectedValue $reportFieldSettings.Value
+                -FieldName $reportFieldSettings.Name -ExpectedValue $reportFieldSettings.Value `
+                -ArticleCount $articleCount
             if (-not $forReport) {
-                Write-Verbose "Artigo $aid ignorado (DynamicField_$($reportFieldSettings.Name) <> $($reportFieldSettings.Value)) ticket $ticketID"
+                Write-Verbose "Artigo $aid ignorado (DynamicField_$($reportFieldSettings.Name) <> $($reportFieldSettings.Value), Count=$articleCount) ticket $ticketID"
                 $skippedReportField++
                 continue
             }
@@ -1670,7 +1781,8 @@ function Get-TicketDataFromHtml {
         Write-Verbose "Ticket $ticketID : $($rowMatches.Count) artigo(s) na tela, 0 visiveis ao cliente ($skippedVisible ignorados). Marque ""Ficar visivel para o Cliente"" ou desative o filtro no menu 5."
     }
     if ($filterReportField -and $rowMatches.Count -gt 0 -and $articles.Count -eq 0) {
-        Write-Verbose "Ticket $ticketID : $($rowMatches.Count) artigo(s) na tela, 0 com DynamicField_$($reportFieldSettings.Name)=$($reportFieldSettings.Value) ($skippedReportField ignorados). Marque ""Enviar para relatorio"" ao criar a nota (AgentTicketNote) ou desative o filtro no menu 5."
+        $repInMap = @($reportFieldMap.Values | Where-Object { $_ }).Count
+        Write-Warn ("Ticket $ticketID : $($rowMatches.Count) artigo(s), $repInMap com Enviar para relatorio=$($reportFieldSettings.Value), 0 exportadas ($skippedReportField ignoradas). Verifique o campo no OTRS ou rode export com -Verbose.")
     }
     $articles.Reverse()
     $ticketObj = [TicketData]::new($numero, $estado, $criado, $cliente, $unidade, $articles)
@@ -1863,13 +1975,25 @@ function Export-CcoReport {
         $diagMapPath = Join-Path $OutputDir "diag_artigos_$diagId.txt"
         $mapLines = [System.Collections.Generic.List[string]]::new()
         $rfDiag = Get-CcoArticleReportDynamicFieldSettings
-        $repMap = Get-ArticleReportFieldMapFromHtml -HTML $diagMain -FieldName $rfDiag.Name -ExpectedValue $rfDiag.Value
+        $repMap = Get-ArticleReportFieldMapFromHtml -HTML $diagMain -FieldName $rfDiag.Name `
+            -ExpectedValue $rfDiag.Value -Client $client -TicketId $diagId -ChallengeToken $diagToken
         foreach ($row in (Get-TicketArticleRowsFromHtml $diagMain)) {
             $vis = Test-ArticleRowVisibleForCustomer -RowTagAttributes $row.RowTag -RowHtml $row.RowHtml
             $cls = Get-HtmlClassAttributeValue $row.RowTag
             if (-not $cls -and $row.RowHtml -match '(?i)class\s*=\s*"([^"]*WidgetSimple[^"]*)"') { $cls = $Matches[1] }
-            $rep = if ($repMap.ContainsKey($row.ArticleId)) { if ($repMap[$row.ArticleId]) { 'SIM' } else { 'NAO' } } else { '?' }
-            $mapLines.Add(("ArticleID={0}  visivel_cliente={1}  enviar_relatorio={2}  classes={3}" -f $row.ArticleId, $(if ($vis) { 'SIM' } else { 'NAO' }), $rep, $cls))
+            $cnt = if ($row.ArticleCount) { $row.ArticleCount } else { Get-ArticleCountFromRowHtml $row.RowTag $row.RowHtml }
+            $rep = if ($repMap.ContainsKey($row.ArticleId)) {
+                if ($repMap[$row.ArticleId]) { 'SIM' } else { 'NAO' }
+            } else { '?' }
+            $rawVal = ''
+            if ($diagToken) {
+                $wHtml = Get-ArticleReportWidgetHtml -ZoomHtml $diagMain -ArticleId $row.ArticleId `
+                    -Client $client -TicketId $diagId -ChallengeToken $diagToken -ArticleCount $cnt
+                $rawVal = Get-ArticleReportFieldValueFromHtml -ArticleHtml $wHtml -FieldName $rfDiag.Name
+            }
+            $valHint = if ($rawVal) { " valor=$rawVal" } else { '' }
+            $mapLines.Add(("ArticleID={0}  Count={1}  visivel_cliente={2}  enviar_relatorio={3}{4}  classes={5}" -f `
+                $row.ArticleId, $cnt, $(if ($vis) { 'SIM' } else { 'NAO' }), $rep, $valHint, $cls))
         }
         $mapLines | Out-File $diagMapPath -Encoding UTF8
         Write-Host "[DIAG] Mapa ArticleID -> visivel: $diagMapPath" -ForegroundColor Yellow
