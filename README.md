@@ -33,7 +33,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubWebDriverDebugAddress` | (Opcional) Ligar ao Chrome/Edge **já aberto** (ex.: `127.0.0.1:9222`). Inicie o browser com `--remote-debugging-port=9222`; o Menu-OTRS não fecha essa janela. |
 | `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |
 | `HubSeleniumModulePath` | (Opcional) Caminho para `Selenium.psd1` ou para a pasta do módulo Selenium **copiada** (sem `Install-Module`). Vazio = usa `tools\Selenium\` junto ao `Menu-OTRS.ps1` ou o módulo na Gallery. |
-| `FilterCustomerVisibleNotesOnly` | Se `true` (padrão), inclui no relatório e no cache **apenas** artigos marcados no OTRS com **“Ficar visível para o Cliente”** (`IsVisibleForCustomer`). O Znuny expõe isso na tabela de artigos pela classe CSS `VisibleForCustomer`. Defina `false` para voltar a importar todas as notas (exceto auto-notas filtradas pelos padrões internos). |
+| `FilterCustomerVisibleNotesOnly` | Se `true` (padrão), inclui no relatório e no cache **apenas** artigos marcados no OTRS com **“Ficar visível para o Cliente”** (`IsVisibleForCustomer`). No `AgentTicketZoom`, o Znuny marca a linha do artigo com a classe CSS `VisibleForCustomer` (o checkbox na tela de nota dispara `ShowHideAJAXHandler` com `TargetChange=IsVisibleForCustomer`, conforme captura no DevTools). Defina `false` para importar todas as notas (exceto auto-notas filtradas pelos padrões internos). |
 
 Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
@@ -42,13 +42,15 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 1. **Gerar relatório TXT** — Formato WhatsApp/CCO; na mesma execução grava o `Relatorio_CCO_*.json` (resumo ativos/resolvidos). Por padrão, **só entram notas visíveis ao cliente** (checkbox “Ficar visível para o Cliente” no OTRS). Antes da exportação, pergunta se deseja **todas as notas** ou **apenas as 5 mais recentes** por chamado nos TXT e no JSON de resumo (o cache interno segue a mesma regra de visibilidade).
 2. **Gerar relatório JSON** — Mesmo fluxo do item 1: atualiza o cache a partir do OTRS, gera TXT e `Relatorio_CCO_*.json` na mesma execução, com a mesma opção de notas (**todas** vs **5 últimas**) no material exportado.
 3. **Visualizar chamados** — Submenu:
-   - **OTRS tempo real (4 notas)** — Atualização a cada 60 s; apenas as **quatro notas mais recentes** por chamado (consulta direta ao OTRS).
-   - **OTRS tempo real (todas)** — Mesmo fluxo em tempo real, porém com **todas as notas** de cada chamado ativo (mais lento).
-   - **Cache local** — Último JSON gerado, sem consultar o OTRS; rolagem livre das notas.
+   - **OTRS tempo real (4 notas)** — Atualização a cada 60 s; **quatro notas mais recentes** por chamado (respeita o filtro de visibilidade ao cliente se estiver ativo).
+   - **OTRS tempo real (todas)** — Mesmo fluxo com **todas as notas** por chamado (mais lento).
+   - **Cache local** — Último JSON gerado, sem consultar o OTRS.
+   - **Críticos visíveis (4)** — Perfil KPI + **somente** notas com “Ficar visível para o Cliente”; 4 notas recentes.
 4. **Alterar credenciais** — OTRS.
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
 7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets`; **POST**/`PUT`. HTML de pré-visualização; com **`HubWebDriverEnabled`** o script **escreve directamente** no Gerador (WebDriver + JavaScript), numa janela nova ou no browser aberto (`HubWebDriverDebugAddress`). Após envio API, pode abrir o Hub (`HubEncaminharPath`).
+8. **Críticos visíveis** — Exportação dedicada: chamados do **perfil KPI** (`SearchPath`, ex. `Profile=94_8`) com **apenas notas visíveis ao cliente** (`IsVisibleForCustomer`), independentemente de `FilterCustomerVisibleNotesOnly` estar desligado nas opções 1–2. Gera os mesmos TXT/JSON de resumo que o relatório CCO.
 
 ### Normalização (avisos ao operador)
 

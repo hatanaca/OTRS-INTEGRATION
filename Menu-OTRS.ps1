@@ -62,9 +62,10 @@ function Write-Banner {
 }
 
 function Write-StatusBar {
-    param([string]$User, [string]$HostDisplay, [string]$CfgStatus)
+    param([string]$User, [string]$HostDisplay, [string]$CfgStatus, [bool]$VisibleNotesOnly = $true)
     Write-ThinDiv 'DarkGray'
-    Write-Host ("  Usuario: " + $User + "   Servidor: " + $HostDisplay + "   Config: " + $CfgStatus) -ForegroundColor DarkGray
+    $visTag = if ($VisibleNotesOnly) { 'Notas: visivel cliente' } else { 'Notas: todas' }
+    Write-Host ("  Usuario: " + $User + "   Servidor: " + $HostDisplay + "   " + $visTag + "   Config: " + $CfgStatus) -ForegroundColor DarkGray
     Write-ThinDiv 'DarkGray'
     Write-Host ""
 }
@@ -706,9 +707,32 @@ function Test-AutoNote {
 }
 
 function Test-ArticleRowVisibleForCustomer {
-    param([string]$RowTagAttributes)
-    if (-not $RowTagAttributes) { return $false }
-    return ($RowTagAttributes -match '\bVisibleForCustomer\b')
+    param(
+        [string]$RowTagAttributes,
+        [string]$RowHtml = ''
+    )
+    # Znuny marca artigos com checkbox "Ficar visivel para o Cliente" (IsVisibleForCustomer)
+    # com classe CSS VisibleForCustomer na linha da tabela do AgentTicketZoom.
+    $blob = ($RowTagAttributes + ' ' + $RowHtml)
+    if (-not $blob.Trim()) { return $false }
+    if ($blob -match '\bVisibleForCustomer\b') { return $true }
+    if ($blob -match '(?i)isvisibleforcustomer') { return $true }
+    if ($blob -match '(?i)vis[ií]vel\s+para\s+o\s+cliente') { return $true }
+    if ($blob -match '(?i)visible\s+for\s+(the\s+)?customer') { return $true }
+    return $false
+}
+
+function Get-VisibleNotesFilterLabel {
+    param([bool]$Enabled)
+    if ($Enabled) {
+        return 'Somente notas com "Ficar visivel para o Cliente" (IsVisibleForCustomer)'
+    }
+    return 'Todas as notas (filtro de visibilidade desligado)'
+}
+
+function Set-CcoVisibleNotesFilter {
+    param([bool]$Enabled)
+    $script:CcoConfig.FilterCustomerVisibleNotesOnly = $Enabled
 }
 
 function Sync-CcoConfigFromCfg {
@@ -814,7 +838,7 @@ function Get-TicketDataFromHtml {
         if (($m = [regex]::Match($rowHtml, '<input[^>]+class="ArticleID"[^>]+value="(\d+)"')).Success) { $aid = $m.Groups[1].Value } else { $aid = $null }
         if (($m = [regex]::Match($rowHtml, '<td class="Created">[^<]*<div title="([^"]+)"')).Success) { $adate = $m.Groups[1].Value } else { $adate = 'N/D' }
         if (-not $aid) { continue }
-        if ($filterVisibleOnly -and -not (Test-ArticleRowVisibleForCustomer $rowTag)) {
+        if ($filterVisibleOnly -and -not (Test-ArticleRowVisibleForCustomer -RowTagAttributes $rowTag -RowHtml $rowHtml)) {
             Write-Verbose "Artigo $aid ignorado (nao marcado como visivel ao cliente) ticket $ticketID"
             continue
         }
@@ -884,10 +908,10 @@ function Read-NotasExportOption {
     Write-Host "  Opcao [1]: " -ForegroundColor Cyan -NoNewline
     $o = (Read-Host).Trim()
     if ($o -eq '2') {
-        Write-Info "Exportacao com as 5 notas mais recentes por chamado (o cache JSON interno permanece com todas as notas)."
+        Write-Info "Exportacao com as 5 notas mais recentes por chamado (entre as notas que passarem no filtro de visibilidade)."
         return 5
     }
-    Write-Info "Exportacao com todas as notas obtidas de cada chamado."
+    Write-Info "Exportacao com todas as notas obtidas de cada chamado (respeitando filtro de visibilidade ao cliente)."
     return 0
 }
 
@@ -950,8 +974,17 @@ function Export-CcoReport {
         [int]$SleepTicketMs = 100,
         [int]$MaxNotesExport = 0,
         [switch]$AbrirRelatorio,
-        [switch]$DiagMode
+        [switch]$DiagMode,
+        [Nullable[bool]]$FilterCustomerVisibleNotesOnly = $null
     )
+
+    $filterOverridden = ($null -ne $FilterCustomerVisibleNotesOnly)
+    $prevVisibleFilter = $script:CcoConfig.FilterCustomerVisibleNotesOnly
+    if ($filterOverridden) {
+        Set-CcoVisibleNotesFilter ([bool]$FilterCustomerVisibleNotesOnly)
+    }
+
+    try {
 
     $now = Get-Date
     $stdHour = [math]::Floor([int]$now.Hour / 2) * 2
@@ -1091,6 +1124,12 @@ function Export-CcoReport {
     }
 
     $client.Logout()
+
+    } finally {
+        if ($filterOverridden) {
+            Set-CcoVisibleNotesFilter $prevVisibleFilter
+        }
+    }
 }
 
 # =============================================================================
@@ -1288,6 +1327,58 @@ function Invoke-GerarJson {
     Write-Host ""
     Write-OK ("JSON salvo em: " + $jsonMeta.Path)
     Write-Info ("TXT do CCO atualizado na mesma execucao. Ativos: " + $jsonMeta.TotalAtivos + "   Resolvidos: " + $jsonMeta.TotalResolvidos)
+    Pause-Screen
+}
+
+# =============================================================================
+# Criticos: somente notas visiveis ao cliente (IsVisibleForCustomer)
+# =============================================================================
+
+function Invoke-GerarCriticosVisivelCliente {
+    param([hashtable]$Cfg, [string]$ExportScript)
+    Write-Banner
+    Write-Centered "-- CRITICOS: NOTAS VISIVEIS AO CLIENTE --" 'White'
+    Write-Host ""
+    Write-Info ("Servidor: " + $Cfg.BaseURL)
+    Write-Info ("Perfil KPI (criticos): " + $Cfg.SearchPath)
+    Write-Info (Get-VisibleNotesFilterLabel $true)
+    Write-Warn 'Somente artigos com checkbox "Ficar visivel para o Cliente" no OTRS (VisibleForCustomer / IsVisibleForCustomer).'
+    Write-Host ""
+    Write-ThinDiv 'DarkGray'
+    Write-Host ""
+    $maxNotesExport = Read-NotasExportOption
+    try {
+        Ensure-ExportScript $ExportScript
+    } catch {
+        Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
+    }
+    $params = @{
+        BaseURL                        = $Cfg.BaseURL
+        Username                       = $Cfg.Username
+        Password                       = $Cfg.Password
+        SearchPath                     = $Cfg.SearchPath
+        EstadoFile                     = $Cfg.EstadoFile
+        OutputDir                      = $Cfg.OutputPath
+        AbrirRelatorio                 = $false
+        DiagMode                       = $false
+        MaxNotesExport                 = $maxNotesExport
+        FilterCustomerVisibleNotesOnly = $true
+    }
+    try {
+        Export-CcoReport @params
+        Write-Host ""
+        Write-OK 'Relatorio de criticos gerado (somente notas visiveis ao cliente).'
+        $jsonMeta = Export-RelatorioCcoJsonFile $Cfg -MaxNotesExport $maxNotesExport
+        if ($jsonMeta) {
+            Write-OK ("Resumo JSON: " + $jsonMeta.Path)
+            Write-Info ("Ativos: " + $jsonMeta.TotalAtivos + "   Resolvidos: " + $jsonMeta.TotalResolvidos)
+        } else {
+            Write-Warn 'Cache nao encontrado apos export; JSON de resumo nao foi gerado.'
+        }
+    } catch {
+        Write-Host ""
+        Write-Err ("Erro: " + $_)
+    }
     Pause-Screen
 }
 
@@ -1676,9 +1767,11 @@ function Show-VisualizadorMenu {
     Write-Banner
     Write-Centered "-- VISUALIZAR CHAMADOS --" 'White'
     Write-Host ""
-    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    'Atualiza a cada 60s; apenas as 4 notas mais recentes por chamado'
-    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    'Atualiza a cada 60s; todas as notas de cada chamado ativo (mais lento)'
-    Write-MenuOpt '3' 'Cache local (offline)     ' 'Yellow'   'Ultimo relatorio salvo em JSON; todas as notas, sem consultar OTRS'
+    $visHint = if ($Cfg.FilterCustomerVisibleNotesOnly) { 'so notas visiveis ao cliente' } else { 'todas as notas (filtro desligado)' }
+    Write-MenuOpt '1' 'OTRS tempo real (4 notas) ' 'White'    ("Atualiza a cada 60s; 4 notas recentes; " + $visHint)
+    Write-MenuOpt '2' 'OTRS tempo real (todas)   ' 'White'    ("Atualiza a cada 60s; todas as notas; " + $visHint)
+    Write-MenuOpt '3' 'Cache local (offline)     ' 'Yellow'   'Ultimo relatorio salvo em JSON; sem consultar OTRS'
+    Write-MenuOpt '4' 'Criticos visiveis (4)     ' 'Green'    'Perfil KPI + somente notas IsVisibleForCustomer; 4 recentes'
     Write-MenuOpt '0' 'Voltar                    ' 'DarkGray' ''
     Write-Host ""
     Write-Info "Em qualquer modo OTRS: alerta em tela cheia se um chamado passar a estado normalizado."
@@ -1691,6 +1784,11 @@ function Show-VisualizadorMenu {
         '1' { Show-VisualizadorRealTime   $Cfg $ExportScript }
         '2' { Show-VisualizadorRealTime   $Cfg $ExportScript -TodasNotas }
         '3' { Show-VisualizadorCompleto   $Cfg $ExportScript }
+        '4' {
+            $prev = $script:CcoConfig.FilterCustomerVisibleNotesOnly
+            Set-CcoVisibleNotesFilter $true
+            try { Show-VisualizadorRealTime $Cfg $ExportScript } finally { Set-CcoVisibleNotesFilter $prev }
+        }
     }
 }
 
@@ -3096,18 +3194,19 @@ function Show-MainMenu {
         $hostDisplay = try { ([uri]$Cfg.BaseURL).Host } catch { $Cfg.BaseURL }
 
         Write-Banner
-        Write-StatusBar $Cfg.Username $hostDisplay $cfgStatus
+        Write-StatusBar $Cfg.Username $hostDisplay $cfgStatus $Cfg.FilterCustomerVisibleNotesOnly
         Write-Centered "-- MENU PRINCIPAL --" 'White'
         Write-Host ""
 
-        Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'TXT + Relatorio_CCO_*.json; pergunta todas as notas ou 5 no export'
-        Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Mesmo export (TXT+cache+JSON); pergunta todas as notas ou 5 no export'
-        Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS em tempo real ou cache local; alerta de normalizacao'
+        Write-MenuOpt '1' 'Gerar Relatorio TXT'     'White'    'TXT + JSON; notas conforme filtro de visibilidade (config)'
+        Write-MenuOpt '2' 'Gerar Relatorio JSON'    'White'    'Mesmo export (TXT+cache+JSON)'
+        Write-MenuOpt '3' 'Visualizar Chamados'     'Yellow'   'OTRS tempo real, criticos visiveis ou cache'
         Write-Host ""
         Write-MenuOpt '4' 'Alterar Credenciais'     'Cyan'     'Usuario, senha e URL'
-        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca, cache, Hub (URL, API, email/senha API)'
+        Write-MenuOpt '5' 'Configuracoes'           'Cyan'     'Busca KPI, filtro IsVisibleForCustomer, Hub'
         Write-MenuOpt '6' 'Salvar Credenciais'      'DarkGray' ''
-        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'API + HTML; WebDriver escreve directo no Gerador; JSON+ajuda se API falhar'
+        Write-MenuOpt '7' 'Sincronizar com Hub'   'Magenta'  'API + HTML; WebDriver no Gerador CCO'
+        Write-MenuOpt '8' 'Criticos visiveis'       'Green'    'Perfil KPI + so notas ""Ficar visivel para o Cliente""'
         Write-Host ""
         Write-MenuOpt '0' 'Sair'                    'DarkGray' ''
         Write-Host ""
@@ -3124,6 +3223,7 @@ function Show-MainMenu {
             '5' { $Cfg = Show-Configuracoes $Cfg $ConfigFilePath; Sync-CcoConfigFromCfg $Cfg }
             '6' { Show-SalvarCredenciais $Cfg $ConfigFilePath }
             '7' { Invoke-SyncHub $Cfg $ExportScript }
+            '8' { Invoke-GerarCriticosVisivelCliente $Cfg $ExportScript }
             '0' {
                 Write-Banner
                 Write-Centered "Ate logo!" 'DarkCyan'
