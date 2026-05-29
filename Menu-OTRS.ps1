@@ -1,4 +1,4 @@
-# =============================================================================
+﻿﻿# =============================================================================
 # Menu-OTRS.ps1 - Interface TUI para relatorios CCO (Znuny/OTRS)
 # Versao unificada - Export-CcoReport incorporado
 # Compativel com Windows PowerShell 5.1 e PowerShell 7+
@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $script:ExportLoaded = $false
 
 # -----------------------------------------------------------------------------
-# Hub: padroes vazios — preencha config.json (menu 5/6) ou copie config.example.json.
+# Hub: padroes vazios - preencha config.json (menu 5/6) ou copie config.example.json.
 # -----------------------------------------------------------------------------
 $script:MenuOtrsHubDefaultEmail    = ''
 $script:MenuOtrsHubDefaultPassword = ''
@@ -134,7 +134,7 @@ function Initialize-ConfigFile {
             New-Item -ItemType Directory -Path $destDir -Force | Out-Null
         }
         Copy-Item -LiteralPath $src -Destination $Path -Force
-        Write-Host ("  [config] Criado " + $Path + " a partir de " + $src + " — preencha Username, Password e HubPassword.") -ForegroundColor Yellow
+        Write-Host ("  [config] Criado " + $Path + " a partir de " + $src + " - preencha Username, Password e HubPassword.") -ForegroundColor Yellow
         return $true
     }
     return $false
@@ -1086,7 +1086,7 @@ function Test-ArticleRowVisibleForCustomer {
         [string]$RowTagAttributes,
         [string]$RowHtml = ''
     )
-    # Classe CSS exata do Znuny (TreeItem / WidgetSimple) — token, nunca substring em NotVisibleForCustomer.
+    # Classe CSS exata do Znuny (TreeItem / WidgetSimple) - token, nunca substring em NotVisibleForCustomer.
     $tagClasses = Get-HtmlClassAttributeValue $RowTagAttributes
     if (Test-ArticleClassStringVisibleForCustomer $tagClasses) { return $true }
 
@@ -1232,7 +1232,7 @@ function Get-TicketDataFromHtml {
     if ($rowMatches.Count -eq 0) {
         Write-Verbose "Nenhuma linha de artigo encontrada no HTML do ticket $ticketID (abra o chamado em AgentTicketZoom, nao no formulario de nota)."
         if ($filterVisibleOnly) {
-            Write-Warn "Ticket $ticketID : ArticleTable/artigos nao encontrados no HTML — filtro de visibilidade nao pode ser aplicado."
+            Write-Warn "Ticket $ticketID : ArticleTable/artigos nao encontrados no HTML - filtro de visibilidade nao pode ser aplicado."
         }
     }
 
@@ -2552,7 +2552,7 @@ function Export-HubTicketAssistantHtml {
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8"/>
-<title>Hub ticket #$TicketNum — JSON</title>
+<title>Hub ticket #$TicketNum - JSON</title>
 <style>
 body{font-family:Segoe UI,sans-serif;background:#1e293b;color:#e2e8f0;padding:1.5rem;max-width:56rem;margin:0 auto;}
 textarea{width:100%;min-height:14rem;font-family:Consolas,monospace;font-size:12px;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:10px;}
@@ -2793,7 +2793,7 @@ a{color:#0b5;}
 </style>
 </head>
 <body>
-<h1>Pre-visualizacao — Relatorio CCO (Hub)</h1>
+<h1>Pre-visualizacao - Relatorio CCO (Hub)</h1>
 <p class="hint">Revise os campos abaixo (espelho do que sera enviado pela API). Depois volte ao <kbd>Menu-OTRS</kbd> e confirme o envio. Hub: <a href="$hubL">$hubL</a></p>
 <div class="box">
 <table>
@@ -2961,7 +2961,7 @@ function Export-HubRelatorioAutofillHelperHtml {
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Preencher Hub — #$($Payload.number)</title>
+<title>Preencher Hub - #$($Payload.number)</title>
 <style>
 body{font-family:Segoe UI,Tahoma,sans-serif;margin:1.25rem;background:#0f172a;color:#e2e8f0;max-width:48rem;}
 h1{font-size:1.1rem;}
@@ -3616,9 +3616,9 @@ function Show-Configuracoes {
     $Cfg.HubWebDriverDebugAddress = Read-Field "Hub: ligar ao browser aberto (ex.: 127.0.0.1:9222; vazio = nova janela WebDriver)" ([string]$Cfg.HubWebDriverDebugAddress)
     $Cfg.HubSeleniumModulePath = Read-Field "Hub: caminho Selenium.psd1 ou pasta do modulo (vazio = Gallery ou tools\Selenium)" ([string]$Cfg.HubSeleniumModulePath)
     Write-Info "Browser aberto: chrome.exe --remote-debugging-port=9222 (ou edge) + HubWebDriverDebugAddress=127.0.0.1:9222"
-    Write-Info "Sem Install-Module: copie o modulo para tools\Selenium junto ao Menu-OTRS.ps1 ou aponte HubSeleniumModulePath — tools\Selenium\README.md"
+    Write-Info "Sem Install-Module: copie o modulo para tools\Selenium junto ao Menu-OTRS.ps1 ou aponte HubSeleniumModulePath - tools\Selenium\README.md"
     Write-Info "Selenium Gallery (se permitido): Install-Module Selenium -Scope CurrentUser"
-    Write-Info "Opcional: HubFormSelectors no config.json (JSON) afinar selectores ao colar o script na consola do Hub — ver README."
+    Write-Info "Opcional: HubFormSelectors no config.json (JSON) afinar selectores ao colar o script na consola do Hub - ver README."
     Write-Host ""
     Write-Host ("  Salvar em " + $ConfigFilePath + "? [S/n]: ") -ForegroundColor Yellow -NoNewline
     $resp = Read-Host
