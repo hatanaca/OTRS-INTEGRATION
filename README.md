@@ -91,6 +91,8 @@ Após preencher credenciais, use a opção **9** (Críticos relatório) para o m
 
 Para validar um chamado (ex. `TicketID=2840100`), abra o **chamado completo** no agente, use opção **9**, **8** ou export com `-DiagMode`, e confira `diag_artigos_*.txt`.
 
+**Nota:** a tela `AgentTicketZoom` contém links de menu com `Action=AgentTicketNote` (“Adicionar nota”); o script distingue o **popup de nota** (campo oculto `Action=AgentTicketNote` sem `ArticleTable`) da **visão do chamado**.
+
 ### Normalização (avisos ao operador)
 
 Nos modos em tempo real e ao recarregar o cache (`R` no visualizador offline), se o **estado** de um chamado passar a um valor considerado resolvido/normalizado (resolvido, fechado, merged, etc.), é exibido um **alerta em tela cheia** listando os chamados afetados.
