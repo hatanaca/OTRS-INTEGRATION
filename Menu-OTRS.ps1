@@ -420,11 +420,14 @@ class OtrsClient {
             -Headers $headers -WebSession $this.Session -UseBasicParsing -ErrorAction Stop
         $text = $this.GetResponseText($response)
         $ok = $false
-        if ($text -match '(?i)"Success"\s*:\s*1|"Success":true') { $ok = $true }
+        if ($text -match '(?i)"Success"\s*:\s*1|"Success"\s*:\s*true') { $ok = $true }
         elseif ($text -match '(?i)Article filter settings were saved|Filter settings were saved') { $ok = $true }
-        elseif ($text -match '(?i)filtro de artigos|configura.{0,4}es de filtro|Filter settings') { $ok = $true }
-        elseif ($text -match '(?i)CustomerVisibilityFilter') { $ok = $true }
-        Write-Verbose "Filtro artigos OTRS ticket $ticketID : CustomerVisibilityFilter=$customerVisibility (ok=$ok) resp=$($text.Substring(0, [Math]::Min(120, $text.Length)))"
+        elseif ($text -match '(?i)filtro de artigos|configura.{0,8} de filtro') { $ok = $true }
+        elseif ($text -match '(?i)"Message"\s*:\s*"[^"]*(?:saved|salv|gravado)') { $ok = $true }
+        Write-Verbose "Filtro artigos OTRS ticket $ticketID : CustomerVisibilityFilter=$customerVisibility (ok=$ok) resp=$($text.Substring(0, [Math]::Min(200, $text.Length)))"
+        if (-not $ok) {
+            Write-Verbose "ArticleFilterSet sem confirmacao (Znuny espera JSON Message ou Success). Filtro CSS por linha da ArticleTable sera usado."
+        }
         return [bool]$ok
     }
 
@@ -803,13 +806,40 @@ function Get-CcoFilterVisibleOnly {
     return [bool]$v
 }
 
+function Resolve-CcoEstadoFilePath {
+    param(
+        [string]$EstadoFile,
+        [string]$OutputDir = ''
+    )
+    if (-not $EstadoFile) { $EstadoFile = 'estado_chamados.json' }
+    if ([System.IO.Path]::IsPathRooted($EstadoFile)) { return $EstadoFile }
+    $base = if ($OutputDir) { $OutputDir } else { $PWD.Path }
+    return (Join-Path $base $EstadoFile)
+}
+
 function Clear-CcoTicketCache {
     param([string]$CachePath)
     if (-not $CachePath) { return }
     if (Test-Path $CachePath) {
         Remove-Item -LiteralPath $CachePath -Force -ErrorAction SilentlyContinue
         Write-Verbose "Cache removido: $CachePath"
+        Write-Host ("  Cache apagado: " + $CachePath) -ForegroundColor DarkGray
     }
+}
+
+function Write-CcoExportFilterLog {
+    param(
+        [string]$OutputDir,
+        [System.Collections.Generic.List[string]]$Lines
+    )
+    if (-not $Lines -or $Lines.Count -eq 0) { return }
+    $dir = if ($OutputDir) { $OutputDir } else { $PWD.Path }
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $path = Join-Path $dir ('export_filtro_visibilidade_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + '.txt')
+    $Lines | Out-File -LiteralPath $path -Encoding UTF8
+    Write-Info ("Log do filtro: " + $path)
 }
 
 function Get-OtrsArticleVisibilityStatsFromHtml {
@@ -877,6 +907,24 @@ function Get-ArticleIdsFromZoomConfigHtml {
     if (-not $HTML) { return @() }
     if (-not (($m = [regex]::Match($HTML, 'ArticleIDs"\s*:\s*\[([^\]]*)\]')).Success)) { return @() }
     return @([regex]::Matches($m.Groups[1].Value, '\d+') | ForEach-Object { $_.Value })
+}
+
+function Get-ArticleVisibilityMapFromHtml {
+    param([string]$HTML)
+    $map = @{}
+    if (-not $HTML) { return $map }
+    foreach ($row in (Get-TicketArticleRowsFromHtml -HTML $HTML)) {
+        if (-not $row.ArticleId) { continue }
+        $map[$row.ArticleId] = Test-ArticleRowVisibleForCustomer -RowTagAttributes $row.RowTag -RowHtml $row.RowHtml
+    }
+    $widgetPat = '(?is)<a\s+[^>]*\bname\s*=\s*["'']Article(\d+)["''][^>]*>[\s\S]*?<div\s+class\s*=\s*["'']([^"'']*WidgetSimple[^"'']*)["'']'
+    foreach ($wm in [regex]::Matches($HTML, $widgetPat)) {
+        $aid = $wm.Groups[1].Value
+        if (-not $aid) { continue }
+        $cls = $wm.Groups[2].Value
+        $map[$aid] = Test-ArticleClassStringVisibleForCustomer $cls
+    }
+    return $map
 }
 
 function Get-ArticleRowFromWidgetAnchorHtml {
@@ -951,8 +999,14 @@ function Get-OtrsTicketZoomHtmlForExport {
         }
         $html = Get-OtrsTicketZoomHtmlAllPages -Client $Client -TicketID $TicketID
         $statsAfter = Get-OtrsArticleVisibilityStatsFromHtml $html
-        if ($filterApplied -and $statsAfter.NotVisible -gt 0) {
-            Write-Verbose ("Ticket $TicketID : apos filtro OTRS ainda ha $($statsAfter.NotVisible) linha(s) NotVisibleForCustomer (antes $($statsBefore.NotVisible)); filtro CSS por linha continua ativo.")
+        if ($filterApplied) {
+            Write-Verbose ("Ticket $TicketID : filtro sessao OTRS OK. HTML: $($statsAfter.TotalRows) linha(s), $($statsAfter.Visible) VisibleForCustomer, $($statsAfter.NotVisible) NotVisibleForCustomer.")
+            if ($statsAfter.TotalRows -gt 0 -and $statsAfter.NotVisible -eq 0 -and $statsBefore.NotVisible -gt 0) {
+                Write-Verbose "Ticket $TicketID : sessao filtrou artigos no servidor (NotVisible sumiu do HTML)."
+            }
+        }
+        if ($statsAfter.NotVisible -gt 0) {
+            Write-Verbose ("Ticket $TicketID : $($statsAfter.NotVisible) linha(s) NotVisibleForCustomer no HTML; export usara filtro por classe CSS.")
         }
         if ($statsAfter.TotalRows -gt 0 -and $statsAfter.Visible -eq 0 -and $statsBefore.Visible -gt 0) {
             Write-Verbose "Ticket $TicketID : nenhuma nota VisibleForCustomer no HTML apos filtro; verifique marcacoes no OTRS."
@@ -1006,7 +1060,10 @@ function Get-TicketArticleTableHtmlScope {
 }
 
 function Get-TicketArticleRowsFromHtml {
-    param([string]$HTML)
+    param(
+        [string]$HTML,
+        [switch]$OnlyVisibleForCustomer
+    )
     $rows = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
     $tableScope = Get-TicketArticleTableHtmlScope $HTML
@@ -1060,6 +1117,16 @@ function Get-TicketArticleRowsFromHtml {
                 ArticleId = $aid
             })
         }
+    }
+
+    if ($OnlyVisibleForCustomer -and $rows.Count -gt 0) {
+        $filtered = [System.Collections.Generic.List[object]]::new()
+        foreach ($row in $rows) {
+            if (Test-ArticleRowVisibleForCustomer -RowTagAttributes $row.RowTag -RowHtml $row.RowHtml) {
+                $filtered.Add($row)
+            }
+        }
+        return $filtered
     }
     return $rows
 }
@@ -1226,13 +1293,28 @@ function Get-TicketDataFromHtml {
 
     $articles = [System.Collections.Generic.List[object]]::new()
     $filterVisibleOnly = Get-CcoFilterVisibleOnly
-    $rowMatches = Get-TicketArticleRowsFromHtml $HTML
+    $visibilityMap = if ($filterVisibleOnly) { Get-ArticleVisibilityMapFromHtml $HTML } else { @{} }
+    $rowMatches = if ($filterVisibleOnly) {
+        Get-TicketArticleRowsFromHtml -HTML $HTML -OnlyVisibleForCustomer
+    } else {
+        Get-TicketArticleRowsFromHtml -HTML $HTML
+    }
     $skippedVisible = 0
+    if ($filterVisibleOnly -and $visibilityMap.Count -gt 0) {
+        $allInMap = @($visibilityMap.Keys).Count
+        $visInMap = @($visibilityMap.Values | Where-Object { $_ }).Count
+        Write-Verbose "Ticket $ticketID : mapa visibilidade $visInMap visivel(is) / $allInMap artigo(s) no HTML"
+    }
 
     if ($rowMatches.Count -eq 0) {
         Write-Verbose "Nenhuma linha de artigo encontrada no HTML do ticket $ticketID (abra o chamado em AgentTicketZoom, nao no formulario de nota)."
         if ($filterVisibleOnly) {
-            Write-Warn "Ticket $ticketID : ArticleTable/artigos nao encontrados no HTML - filtro de visibilidade nao pode ser aplicado."
+            if ($visibilityMap.Count -gt 0) {
+                $visInMap = @($visibilityMap.Values | Where-Object { $_ }).Count
+                Write-Warn "Ticket $ticketID : $($visibilityMap.Count) artigo(s) no HTML, $visInMap visivel(is) ao cliente, 0 exportados apos filtro."
+            } else {
+                Write-Warn "Ticket $ticketID : ArticleTable/artigos nao encontrados no HTML - filtro de visibilidade nao pode ser aplicado."
+            }
         }
     }
 
@@ -1241,10 +1323,18 @@ function Get-TicketDataFromHtml {
         $rowHtml = $row.RowHtml
         $aid     = $row.ArticleId
         $adate   = Get-ArticleDateFromRowHtml $rowHtml
-        if ($filterVisibleOnly -and -not (Test-ArticleRowVisibleForCustomer -RowTagAttributes $rowTag -RowHtml $rowHtml)) {
-            Write-Verbose "Artigo $aid ignorado (nao marcado como visivel ao cliente) ticket $ticketID"
-            $skippedVisible++
-            continue
+        if ($filterVisibleOnly) {
+            $rowVisible = $false
+            if ($visibilityMap.ContainsKey($aid)) {
+                $rowVisible = [bool]$visibilityMap[$aid]
+            } else {
+                $rowVisible = Test-ArticleRowVisibleForCustomer -RowTagAttributes $rowTag -RowHtml $rowHtml
+            }
+            if (-not $rowVisible) {
+                Write-Verbose "Artigo $aid ignorado (nao marcado como visivel ao cliente) ticket $ticketID"
+                $skippedVisible++
+                continue
+            }
         }
         try {
             $raw = $client.GetArticleContent($ticketID, $aid)
@@ -1479,13 +1569,16 @@ function Export-CcoReport {
         return
     }
 
+    $estadoPath = Resolve-CcoEstadoFilePath -EstadoFile $EstadoFile -OutputDir $OutputDir
+    $filterLogLines = [System.Collections.Generic.List[string]]::new()
     if (Get-CcoFilterVisibleOnly) {
-        Clear-CcoTicketCache $EstadoFile
-        Write-Info 'Cache estado_chamados.json removido para forcar leitura com filtro de visibilidade.'
+        [void]$filterLogLines.Add(('Inicio export: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' | FilterCustomerVisibleNotesOnly=true'))
+        Clear-CcoTicketCache $estadoPath
+        Write-Info ('Cache removido: ' + $estadoPath)
     }
 
     $activeIds = $client.GetActiveTicketIDs($SearchPath)
-    $cache = [TicketCache]::new($EstadoFile)
+    $cache = [TicketCache]::new($estadoPath)
 
     Write-Verbose "Ativos na busca: $($activeIds.Count)"
     Write-Verbose "Em cache: $($cache.Data.Count)"
@@ -1551,6 +1644,14 @@ function Export-CcoReport {
                 $visStats = Get-OtrsArticleVisibilityStatsFromHtml $html
                 Write-Warn ("Ticket $tid : 0 notas exportadas. No HTML: $($visStats.TotalRows) artigo(s), $($visStats.Visible) com VisibleForCustomer, $($visStats.NotVisible) internas.")
             }
+            if (Get-CcoFilterVisibleOnly) {
+                $expN = if ($parseStats) { $parseStats.Exported } else { $ticket.Articles.Count }
+                $skipN = if ($parseStats) { $parseStats.SkippedInternal } else { 0 }
+                $visStats = Get-OtrsArticleVisibilityStatsFromHtml $html
+                $line = "TicketID=$tid exportadas=$expN ignoradas_internas=$skipN html_linhas=$($visStats.TotalRows) visiveis=$($visStats.Visible) nao_visiveis=$($visStats.NotVisible)"
+                [void]$filterLogLines.Add($line)
+                Write-Verbose $line
+            }
             $cache.Update($tid, $ticket)
 
             if ($ticket.Estado.ToLower().Trim() -in $script:CcoConfig.EstadosResolvidos) {
@@ -1591,6 +1692,8 @@ function Export-CcoReport {
         Write-Host ("  Resumo filtro: $($totalNotesExported) nota(s) exportada(s), $($totalNotesSkippedInternal) nota(s) interna(s) ignorada(s).") -ForegroundColor Cyan
         Write-Info 'Filtro: CustomerVisibilityFilter=1 na sessao OTRS (se disponivel) + classes VisibleForCustomer na ArticleTable.'
         Write-Info 'Se ainda vierem notas internas: opcao 8 ou -DiagMode -> diag_artigos_*.txt; confira Ticket::Frontend::TicketArticleFilter no Znuny.'
+        [void]$filterLogLines.Add(('Fim: exportadas=' + $totalNotesExported + ' ignoradas=' + $totalNotesSkippedInternal))
+        Write-CcoExportFilterLog -OutputDir $OutputDir -Lines $filterLogLines
     }
 
     if ($AbrirRelatorio) {
@@ -1838,10 +1941,7 @@ function Invoke-GerarCriticosVisivelCliente {
     }
     Sync-CcoConfigFromCfg $Cfg
     Set-CcoVisibleNotesFilter $true
-    $cachePath = $Cfg.EstadoFile
-    if (-not [System.IO.Path]::IsPathRooted($cachePath)) {
-        $cachePath = Join-Path $Cfg.OutputPath $cachePath
-    }
+    $cachePath = Resolve-CcoEstadoFilePath -EstadoFile $Cfg.EstadoFile -OutputDir $Cfg.OutputPath
     Clear-CcoTicketCache $cachePath
     $params = @{
         BaseURL                        = $Cfg.BaseURL
