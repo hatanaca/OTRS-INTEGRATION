@@ -33,7 +33,7 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubWebDriverDebugAddress` | (Opcional) Ligar ao Chrome/Edge **já aberto** (ex.: `127.0.0.1:9222`). Inicie o browser com `--remote-debugging-port=9222`; o Menu-OTRS não fecha essa janela. |
 | `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |
 | `HubSeleniumModulePath` | (Opcional) Caminho para `Selenium.psd1` ou para a pasta do módulo Selenium **copiada** (sem `Install-Module`). Vazio = usa `tools\Selenium\` junto ao `Menu-OTRS.ps1` ou o módulo na Gallery. |
-| `FilterCustomerVisibleNotesOnly` | Se `true` (padrão), inclui **somente** artigos cuja linha no `AgentTicketZoom` tem classe **`VisibleForCustomer`** (e não `NotVisibleForCustomer`). O nome do campo `IsVisibleForCustomer` no HTML **não** é usado como critério (evita falso positivo). **Após ativar**, apague `estado_chamados.json` uma vez para não reutilizar cache com todas as notas. Defina `false` para importar todas as notas. |
+| `FilterCustomerVisibleNotesOnly` | Se `true` (padrão), aplica o filtro de sessão OTRS **`CustomerVisibilityFilter=1`** (somente artigos `IsVisibleForCustomer` no banco, quando `Ticket::Frontend::TicketArticleFilter` estiver ativo no Znuny) e valida cada linha pela classe **`VisibleForCustomer`** / **`NotVisibleForCustomer`**. O cache `estado_chamados.json` é **apagado automaticamente** ao gerar relatório com este filtro. Defina `false` para importar todas as notas. |
 
 Copie `config.example.json` para `config.json` e preencha. O arquivo `config.json` está no `.gitignore` para evitar enviar credenciais ao Git. No topo de `Menu-OTRS.ps1` existem `MenuOtrsHubDefaultEmail` e `MenuOtrsHubDefaultPassword` usados quando o JSON não traz essas chaves — pode editar aí em vez do `config.json`.
 
@@ -50,7 +50,9 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
 7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets`; **POST**/`PUT`. HTML de pré-visualização; com **`HubWebDriverEnabled`** o script **escreve directamente** no Gerador (WebDriver + JavaScript), numa janela nova ou no browser aberto (`HubWebDriverDebugAddress`). Após envio API, pode abrir o Hub (`HubEncaminharPath`).
-8. **Críticos visíveis** — Exportação dedicada: chamados do **perfil KPI** (`SearchPath`, ex. `Profile=94_8`) com **apenas notas visíveis ao cliente** (`IsVisibleForCustomer`), independentemente de `FilterCustomerVisibleNotesOnly` estar desligado nas opções 1–2. Gera os mesmos TXT/JSON de resumo que o relatório CCO.
+8. **Críticos visíveis** — Exportação dedicada: chamados do **perfil KPI** (`SearchPath`, ex. `Profile=94_8`) com **apenas notas visíveis ao cliente** (`IsVisibleForCustomer`), independentemente de `FilterCustomerVisibleNotesOnly` estar desligado nas opções 1–2. Gera os mesmos TXT/JSON de resumo que o relatório CCO. Limpa o cache automaticamente.
+
+**Diagnóstico de visibilidade:** na exportação com `-DiagMode`, o script grava `diag_main_*.html`, `diag_filtrado_*.html` e `diag_artigos_*.txt` (mapa `ArticleID` → exportar SIM/NAO) na pasta de saída.
 
 ### Normalização (avisos ao operador)
 
