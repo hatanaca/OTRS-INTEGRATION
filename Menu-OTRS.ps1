@@ -746,24 +746,32 @@ function Get-TicketArticleRowsFromHtml {
     param([string]$HTML)
     $rows = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
-    $patterns = @(
-        '(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>',
-        '(?s)<tr([^>]*)>(.*?)</tr>'
-    )
-    foreach ($pat in $patterns) {
-        foreach ($row in [regex]::Matches($HTML, $pat)) {
-            $rowTag  = $row.Groups[1].Value
-            $rowHtml = $row.Groups[2].Value
-            if ($rowHtml -notmatch 'ArticleID') { continue }
-            $aid = Get-ArticleIdFromRowHtml $rowHtml
-            if (-not $aid -or $seen.ContainsKey($aid)) { continue }
-            $seen[$aid] = $true
-            $rows.Add([PSCustomObject]@{
-                RowTag    = $rowTag
-                RowHtml   = $rowHtml
-                ArticleId = $aid
-            })
-        }
+    # Znuny AgentTicketZoom TreeItem: <tr ... VisibleForCustomer|NotVisibleForCustomer ... id="RowN">
+    $pattern = '(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>'
+    foreach ($row in [regex]::Matches($HTML, $pattern)) {
+        $rowTag  = $row.Groups[1].Value
+        $rowHtml = $row.Groups[2].Value
+        $aid = Get-ArticleIdFromRowHtml $rowHtml
+        if (-not $aid -or $seen.ContainsKey($aid)) { continue }
+        $seen[$aid] = $true
+        $rows.Add([PSCustomObject]@{
+            RowTag    = $rowTag
+            RowHtml   = $rowHtml
+            ArticleId = $aid
+        })
+    }
+
+    # Modo "mostrar todos os artigos": widgets com ArticleID na ancora
+    $widgetPat = '(?s)<a\s+[^>]*\bid="Article(\d+)"[^>]*>.*?<div\s+class="([^"]*)"'
+    foreach ($wm in [regex]::Matches($HTML, $widgetPat)) {
+        $aid = $wm.Groups[1].Value
+        if (-not $aid -or $seen.ContainsKey($aid)) { continue }
+        $seen[$aid] = $true
+        $rows.Add([PSCustomObject]@{
+            RowTag    = ('class="' + $wm.Groups[2].Value + '"')
+            RowHtml   = $wm.Value
+            ArticleId = $aid
+        })
     }
     return $rows
 }
@@ -773,13 +781,18 @@ function Test-ArticleRowVisibleForCustomer {
         [string]$RowTagAttributes,
         [string]$RowHtml = ''
     )
-    # Znuny: checkbox IsVisibleForCustomer -> classe VisibleForCustomer na linha do artigo.
-    $blob = ($RowTagAttributes + ' ' + $RowHtml)
-    if (-not $blob.Trim()) { return $false }
-    if ($blob -match '\bVisibleForCustomer\b') { return $true }
-    if ($blob -match '(?i)isvisibleforcustomer') { return $true }
-    if ($blob -match '(?i)vis[i\xED]vel\s+para\s+o\s+cliente') { return $true }
-    if ($blob -match '(?i)visible\s+for\s+(the\s+)?customer') { return $true }
+    # Znuny marca CADA artigo com VisibleForCustomer OU NotVisibleForCustomer (TreeItem / WidgetSimple).
+    # NAO usar texto "visivel para o cliente" nem name=IsVisibleForCustomer sem checked (falso positivo).
+    $tag = [string]$RowTagAttributes
+    if ($tag -match '(?i)\bNotVisibleForCustomer\b') { return $false }
+    if ($tag -match '(?i)\bVisibleForCustomer\b') { return $true }
+
+    if ($RowHtml) {
+        if ($RowHtml -match '(?i)\bNotVisibleForCustomer\b') { return $false }
+        if ($RowHtml -match '(?i)\bclass\s*=\s*"[^"]*\bVisibleForCustomer\b') { return $true }
+        if ($RowHtml -match '(?i)<input[^>]*name\s*=\s*"IsVisibleForCustomer"[^>]*\bchecked\b') { return $true }
+        if ($RowHtml -match '(?i)<input[^>]*\bchecked\b[^>]*name\s*=\s*"IsVisibleForCustomer"') { return $true }
+    }
     return $false
 }
 
@@ -1138,7 +1151,7 @@ function Export-CcoReport {
         $pct = if ($allIds.Count -gt 0) { (($httpCount + $cacheHits) / $allIds.Count * 100) } else { 0 }
         Write-Progress -Activity "Processando tickets" -Status "Ticket $tid" -PercentComplete $pct
 
-        if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds) {
+        if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds -and -not (Get-CcoFilterVisibleOnly)) {
             Write-Verbose "TID $tid - CACHE"
             $ticket = $cache.GetCachedTicket($tid)
             $resolvidos.Add($ticket)
@@ -1193,6 +1206,10 @@ function Export-CcoReport {
     Write-Host "Processados: $($allIds.Count) | Cache: $cacheHits | HTTP: $httpCount | Tempo: $($stopwatch.Elapsed.ToString('mm\:ss'))" -ForegroundColor Green
     if ((Get-CcoFilterVisibleOnly) -and $emptyVisibleTickets -gt 0) {
         Write-Warn ("$emptyVisibleTickets chamado(s) sem notas visiveis ao cliente. Confirme o checkbox ""Ficar visivel para o Cliente"" no OTRS ou desative o filtro no menu 5.")
+    }
+    if ((Get-CcoFilterVisibleOnly) -and -not $filterOverridden) {
+        Write-Info 'Filtro ativo: somente artigos com classe VisibleForCustomer (nao NotVisibleForCustomer) na lista do chamado.'
+        Write-Info 'Se o relatorio ainda listar notas internas, apague estado_chamados.json e gere de novo (cache antigo).'
     }
 
     if ($AbrirRelatorio) {
