@@ -934,13 +934,28 @@ function Get-ArticleDateFromRowHtml {
     return 'N/D'
 }
 
+function Get-TicketArticleTableHtmlScope {
+    param([string]$HTML)
+    if (-not $HTML) { return $null }
+    if (($m = [regex]::Match($HTML, '(?is)<table[^>]*\bid="ArticleTable"[^>]*>.*?</table>')).Success) {
+        return $m.Value
+    }
+    if (($m = [regex]::Match($HTML, '(?is)<tbody[^>]*\bid="ArticleTableBody"[^>]*>.*?</tbody>')).Success) {
+        return $m.Value
+    }
+    return $null
+}
+
 function Get-TicketArticleRowsFromHtml {
     param([string]$HTML)
     $rows = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
+    $tableScope = Get-TicketArticleTableHtmlScope $HTML
+    $rowSource  = if ($tableScope) { $tableScope } else { $HTML }
+    $fromTable  = [bool]$tableScope
     # Znuny TreeItem: <tr class="... VisibleForCustomer|NotVisibleForCustomer ..." id="RowN">
     $pattern = '(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>'
-    foreach ($row in [regex]::Matches($HTML, $pattern)) {
+    foreach ($row in [regex]::Matches($rowSource, $pattern)) {
         $rowTag  = $row.Groups[1].Value
         $rowHtml = $row.Groups[2].Value
         $aid = Get-ArticleIdFromRowHtml $rowHtml
@@ -953,7 +968,10 @@ function Get-TicketArticleRowsFromHtml {
         })
     }
 
-    # Modo "mostrar todos os artigos": blocos WidgetSimple (ancora id ou name ArticleNNN)
+    # Modo "mostrar todos os artigos": blocos WidgetSimple (ancora id ou name ArticleNNN).
+    # Se ArticleTable ja listou os artigos, nao reprocessar widgets (evita duplicata e HTML gigante).
+    if ($fromTable -and $rows.Count -gt 0) { return $rows }
+
     $widgetPat = '(?s)<a\s+[^>]*\b(?:id|name)\s*=\s*"Article(\d+)"[^>]*>[\s\S]*?<div\s+class="([^"]*WidgetSimple[^"]*)"'
     foreach ($wm in [regex]::Matches($HTML, $widgetPat)) {
         $aid = $wm.Groups[1].Value
