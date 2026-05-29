@@ -377,7 +377,7 @@ class OtrsClient {
   # Filtro nativo Znuny (requer Ticket::Frontend::TicketArticleFilter no servidor).
   # CustomerVisibilityFilter: 0 = so invisiveis, 1 = so visiveis, 2 = todos.
     [bool] SetTicketArticleCustomerVisibilityFilter([string]$ticketID, [int]$customerVisibility, [string]$challengeToken) {
-        $uri = "$($this.BaseURL)/index.pl"
+        $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketZoom;TicketID=$ticketID"
         $body = @{
             Action    = 'AgentTicketZoom'
             Subaction = 'ArticleFilterSet'
@@ -390,17 +390,22 @@ class OtrsClient {
         $headers = @{
             'X-Requested-With' = 'XMLHttpRequest'
             'Content-Type'     = 'application/x-www-form-urlencoded; charset=UTF-8'
+            'Accept'           = 'application/json, text/javascript, */*; q=0.01'
         }
         $response = Invoke-WebRequest -Uri $uri -Method POST -Body $body `
             -Headers $headers -WebSession $this.Session -UseBasicParsing -ErrorAction Stop
         $text = $this.GetResponseText($response)
-        $ok = $text -match 'Article filter settings were saved|filtro de artigos|Filter settings'
-        Write-Verbose "Filtro artigos OTRS ticket $ticketID : CustomerVisibilityFilter=$customerVisibility (ok=$ok)"
+        $ok = $false
+        if ($text -match '(?i)"Success"\s*:\s*1|"Success":true') { $ok = $true }
+        elseif ($text -match '(?i)Article filter settings were saved|Filter settings were saved') { $ok = $true }
+        elseif ($text -match '(?i)filtro de artigos|configura.{0,4}es de filtro|Filter settings') { $ok = $true }
+        elseif ($text -match '(?i)CustomerVisibilityFilter') { $ok = $true }
+        Write-Verbose "Filtro artigos OTRS ticket $ticketID : CustomerVisibilityFilter=$customerVisibility (ok=$ok) resp=$($text.Substring(0, [Math]::Min(120, $text.Length)))"
         return [bool]$ok
     }
 
     [void] ResetTicketArticleFilter([string]$ticketID, [string]$challengeToken) {
-        $uri  = "$($this.BaseURL)/index.pl"
+        $uri  = "$($this.BaseURL)/index.pl?Action=AgentTicketZoom;TicketID=$ticketID"
         $body = @{
             Action    = 'AgentTicketZoom'
             Subaction = 'ArticleFilterSet'
@@ -794,15 +799,11 @@ function Get-OtrsArticleVisibilityStatsFromHtml {
     if (-not $HTML) { return [pscustomobject]$stats }
     foreach ($row in (Get-TicketArticleRowsFromHtml $HTML)) {
         $stats.TotalRows++
-        $tagClasses = Get-HtmlClassAttributeValue $row.RowTag
-        if (Test-CssClassListHasToken -ClassValue $tagClasses -Token 'NotVisibleForCustomer') {
+        if (Test-ArticleRowVisibleForCustomer -RowTagAttributes $row.RowTag -RowHtml $row.RowHtml) {
+            $stats.Visible++
+        }
+        elseif (Test-CssClassListHasToken -ClassValue (Get-HtmlClassAttributeValue $row.RowTag) -Token 'NotVisibleForCustomer') {
             $stats.NotVisible++
-        }
-        elseif (Test-CssClassListHasToken -ClassValue $tagClasses -Token 'VisibleForCustomer') {
-            $stats.Visible++
-        }
-        elseif (Test-ArticleRowVisibleForCustomer -RowTagAttributes $row.RowTag -RowHtml $row.RowHtml) {
-            $stats.Visible++
         }
         else {
             $stats.Unknown++
@@ -833,7 +834,41 @@ function Get-HtmlClassAttributeValue {
     if (($m = [regex]::Match($TagFragment, '(?i)class\s*=\s*"([^"]*)"')).Success) {
         return $m.Groups[1].Value.Trim()
     }
+    if (($m = [regex]::Match($TagFragment, "(?i)class\s*=\s*'([^']*)'")).Success) {
+        return $m.Groups[1].Value.Trim()
+    }
     return ''
+}
+
+function Test-ArticleClassStringVisibleForCustomer {
+    param([string]$ClassValue)
+    if (-not $ClassValue) { return $false }
+    if (Test-CssClassListHasToken -ClassValue $ClassValue -Token 'NotVisibleForCustomer') { return $false }
+    if (Test-CssClassListHasToken -ClassValue $ClassValue -Token 'VisibleForCustomer') { return $true }
+    return $false
+}
+
+function Get-ArticleIdsFromZoomConfigHtml {
+    param([string]$HTML)
+    if (-not $HTML) { return @() }
+    if (-not (($m = [regex]::Match($HTML, 'ArticleIDs"\s*:\s*\[([^\]]*)\]')).Success)) { return @() }
+    return @([regex]::Matches($m.Groups[1].Value, '\d+') | ForEach-Object { $_.Value })
+}
+
+function Get-ArticleRowFromWidgetAnchorHtml {
+    param(
+        [string]$HTML,
+        [string]$ArticleId
+    )
+    if (-not $HTML -or -not $ArticleId) { return $null }
+    $pat = '(?is)<a\s+[^>]*\b(?:id|name)\s*=\s*["'']Article' + [regex]::Escape($ArticleId) + '["''][^>]*>[\s\S]*?<div\s+class\s*=\s*["'']([^"'']+)["'']'
+    if (-not (($m = [regex]::Match($HTML, $pat)).Success)) { return $null }
+    $cls = $m.Groups[1].Value
+    return [PSCustomObject]@{
+        RowTag    = ('class="' + $cls + '"')
+        RowHtml   = $m.Value
+        ArticleId = $ArticleId
+    }
 }
 
 function Test-CssClassListHasToken {
@@ -954,7 +989,7 @@ function Get-TicketArticleRowsFromHtml {
     $rowSource  = if ($tableScope) { $tableScope } else { $HTML }
     $fromTable  = [bool]$tableScope
     # Znuny TreeItem: <tr class="... VisibleForCustomer|NotVisibleForCustomer ..." id="RowN">
-    $pattern = '(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>'
+    $pattern = '(?s)<tr([^>]*\bid=["'']Row\d+["''][^>]*)>(.*?)</tr>'
     foreach ($row in [regex]::Matches($rowSource, $pattern)) {
         $rowTag  = $row.Groups[1].Value
         $rowHtml = $row.Groups[2].Value
@@ -968,20 +1003,39 @@ function Get-TicketArticleRowsFromHtml {
         })
     }
 
-    # Modo "mostrar todos os artigos": blocos WidgetSimple (ancora id ou name ArticleNNN).
-    # Se ArticleTable ja listou os artigos, nao reprocessar widgets (evita duplicata e HTML gigante).
-    if ($fromTable -and $rows.Count -gt 0) { return $rows }
+    $configIds = Get-ArticleIdsFromZoomConfigHtml $HTML
+    $expectedCount = if ($configIds.Count -gt 0) { $configIds.Count } else { $rows.Count }
 
-    $widgetPat = '(?s)<a\s+[^>]*\b(?:id|name)\s*=\s*"Article(\d+)"[^>]*>[\s\S]*?<div\s+class="([^"]*WidgetSimple[^"]*)"'
-    foreach ($wm in [regex]::Matches($HTML, $widgetPat)) {
-        $aid = $wm.Groups[1].Value
+    # Tabela completa: nao varrer widgets (HTML enorme em "exibir todos os artigos").
+    if ($fromTable -and $rows.Count -gt 0 -and ($rows.Count -ge $expectedCount -or $configIds.Count -eq 0)) {
+        return $rows
+    }
+
+    # Tabela incompleta (ex.: visao "um artigo") ou sem tabela: ancora ArticleNNN + WidgetSimple.
+    $idsToScan = if ($configIds.Count -gt 0) { $configIds } else {
+        [regex]::Matches($HTML, '(?is)<a\s+[^>]*\b(?:id|name)\s*=\s*["'']Article(\d+)["'']') |
+            ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    }
+    foreach ($aid in $idsToScan) {
         if (-not $aid -or $seen.ContainsKey($aid)) { continue }
+        $wRow = Get-ArticleRowFromWidgetAnchorHtml $HTML $aid
+        if (-not $wRow) { continue }
         $seen[$aid] = $true
-        $rows.Add([PSCustomObject]@{
-            RowTag    = ('class="' + $wm.Groups[2].Value + '"')
-            RowHtml   = $wm.Value
-            ArticleId = $aid
-        })
+        $rows.Add($wRow)
+    }
+
+    if ($rows.Count -eq 0) {
+        $widgetPat = '(?is)<a\s+[^>]*\b(?:id|name)\s*=\s*["'']Article(\d+)["''][^>]*>[\s\S]*?<div\s+class\s*=\s*["'']([^"'']*WidgetSimple[^"'']*)["'']'
+        foreach ($wm in [regex]::Matches($HTML, $widgetPat)) {
+            $aid = $wm.Groups[1].Value
+            if (-not $aid -or $seen.ContainsKey($aid)) { continue }
+            $seen[$aid] = $true
+            $rows.Add([PSCustomObject]@{
+                RowTag    = ('class="' + $wm.Groups[2].Value + '"')
+                RowHtml   = $wm.Value
+                ArticleId = $aid
+            })
+        }
     }
     return $rows
 }
@@ -1008,18 +1062,19 @@ function Test-ArticleRowVisibleForCustomer {
         [string]$RowTagAttributes,
         [string]$RowHtml = ''
     )
-    # Classe CSS exata do Znuny (TreeItem / WidgetSimple) — token, nao substring solta.
+    # Classe CSS exata do Znuny (TreeItem / WidgetSimple) — token, nunca substring em NotVisibleForCustomer.
     $tagClasses = Get-HtmlClassAttributeValue $RowTagAttributes
-    if (Test-CssClassListHasToken -ClassValue $tagClasses -Token 'NotVisibleForCustomer') { return $false }
-    if (Test-CssClassListHasToken -ClassValue $tagClasses -Token 'VisibleForCustomer') { return $true }
+    if (Test-ArticleClassStringVisibleForCustomer $tagClasses) { return $true }
 
     if ($RowHtml) {
-        if ($RowHtml -match '(?i)\bNotVisibleForCustomer\b') { return $false }
-        if ($RowHtml -match '(?i)class\s*=\s*"[^"]*\bWidgetSimple\b[^"]*\bVisibleForCustomer\b') { return $true }
-        if ($RowHtml -match '(?i)class\s*=\s*"[^"]*\bVisibleForCustomer\b[^"]*\bWidgetSimple\b') { return $true }
+        if (($m = [regex]::Match($RowHtml, '(?is)class\s*=\s*"([^"]*WidgetSimple[^"]*)"')).Success) {
+            if (Test-ArticleClassStringVisibleForCustomer $m.Groups[1].Value) { return $true }
+        }
+        if (($m = [regex]::Match($RowHtml, "(?is)class\s*=\s*'([^']*WidgetSimple[^']*)'")).Success) {
+            if (Test-ArticleClassStringVisibleForCustomer $m.Groups[1].Value) { return $true }
+        }
         if ($RowHtml -match '(?i)\bdata-(?:is-)?visible-for-customer\s*=\s*["'']?1') { return $true }
         if ($RowHtml -match '(?i)\bdata-(?:is-)?visible-for-customer\s*=\s*["'']?0') { return $false }
-        # Checkbox apenas dentro desta linha/bloco (nao no HTML inteiro da pagina).
         if ($RowHtml -match '(?is)<input[^>]*\bname\s*=\s*"IsVisibleForCustomer"[^>]*\bchecked\b') { return $true }
         if ($RowHtml -match '(?is)<input[^>]*\bname\s*=\s*"IsVisibleForCustomer"[^>]*>') { return $false }
     }
@@ -1057,7 +1112,8 @@ function Get-TicketDataFromHtml {
         [OtrsClient]$client,
         [int]$maxArticles,
         [int]$fetchLimit,
-        [int]$sleepMs
+        [int]$sleepMs,
+        [switch]$PassThruStats
     )
 
     if (($m = [regex]::Match($HTML, 'Ticket#([0-9]+)')).Success) { $numero = $m.Groups[1].Value } else { $numero = 'N/D' }
@@ -1135,6 +1191,9 @@ function Get-TicketDataFromHtml {
 
     if (Test-OtrsHtmlIsComposeNoteForm $HTML) {
         Write-Warning "Ticket $ticketID : HTML recebido parece ser o popup ""Adicionar nota"" (AgentTicketNote), nao a tela do chamado (AgentTicketZoom). O export de notas exige a lista de artigos do chamado."
+        if ($PassThruStats) {
+            return [PSCustomObject]@{ Ticket = $null; Exported = 0; SkippedInternal = 0 }
+        }
         return $null
     }
     if (-not (Test-OtrsHtmlIsTicketZoom $HTML)) {
@@ -1148,6 +1207,9 @@ function Get-TicketDataFromHtml {
 
     if ($rowMatches.Count -eq 0) {
         Write-Verbose "Nenhuma linha de artigo encontrada no HTML do ticket $ticketID (abra o chamado em AgentTicketZoom, nao no formulario de nota)."
+        if ($filterVisibleOnly) {
+            Write-Warn "Ticket $ticketID : ArticleTable/artigos nao encontrados no HTML — filtro de visibilidade nao pode ser aplicado."
+        }
     }
 
     foreach ($row in $rowMatches) {
@@ -1185,7 +1247,15 @@ function Get-TicketDataFromHtml {
         Write-Verbose "Ticket $ticketID : $($rowMatches.Count) artigo(s) na tela, 0 visiveis ao cliente ($skippedVisible ignorados). Marque ""Ficar visivel para o Cliente"" ou desative o filtro no menu 5."
     }
     $articles.Reverse()
-    return [TicketData]::new($numero, $estado, $criado, $cliente, $unidade, $articles)
+    $ticketObj = [TicketData]::new($numero, $estado, $criado, $cliente, $unidade, $articles)
+    if ($PassThruStats) {
+        return [PSCustomObject]@{
+            Ticket          = $ticketObj
+            Exported        = $articles.Count
+            SkippedInternal = $skippedVisible
+        }
+    }
+    return $ticketObj
 }
 
 # =============================================================================
@@ -1307,6 +1377,12 @@ function Export-CcoReport {
 
     try {
 
+    if (Get-CcoFilterVisibleOnly) {
+        Write-Host "  Filtro de notas: ATIVO (somente VisibleForCustomer / checkbox visivel ao cliente)" -ForegroundColor Green
+    } else {
+        Write-Host "  Filtro de notas: DESLIGADO (todas as notas serao exportadas)" -ForegroundColor Yellow
+    }
+
     $now = Get-Date
     $stdHour = [math]::Floor([int]$now.Hour / 2) * 2
     $dateStr = $now.ToString('dd-MM-yyyy')
@@ -1407,6 +1483,8 @@ function Export-CcoReport {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     $emptyVisibleTickets = 0
+    $totalNotesExported = 0
+    $totalNotesSkippedInternal = 0
 
     foreach ($tid in $allIds) {
         $pct = if ($allIds.Count -gt 0) { (($httpCount + $cacheHits) / $allIds.Count * 100) } else { 0 }
@@ -1427,14 +1505,27 @@ function Export-CcoReport {
             } else {
                 Get-OtrsTicketZoomHtmlAllPages -Client $client -TicketID $tid
             }
-            $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $tid -client $client `
-                -maxArticles $MaxArticles -fetchLimit $FetchLimit -sleepMs $SleepArticleMs
+            $parseStats = $null
+            if (Get-CcoFilterVisibleOnly) {
+                $parseStats = Get-TicketDataFromHtml -HTML $html -ticketID $tid -client $client `
+                    -maxArticles $MaxArticles -fetchLimit $FetchLimit -sleepMs $SleepArticleMs -PassThruStats
+            } else {
+                $ticket = Get-TicketDataFromHtml -HTML $html -ticketID $tid -client $client `
+                    -maxArticles $MaxArticles -fetchLimit $FetchLimit -sleepMs $SleepArticleMs
+            }
+            if ($parseStats) {
+                $ticket = $parseStats.Ticket
+                $totalNotesExported += $parseStats.Exported
+                $totalNotesSkippedInternal += $parseStats.SkippedInternal
+            }
             if (-not $ticket) {
                 Write-Warning "Nao foi possivel extrair dados do ticket $tid"
                 continue
             }
             if ((Get-CcoFilterVisibleOnly) -and $ticket.Articles.Count -eq 0) {
                 $emptyVisibleTickets++
+                $visStats = Get-OtrsArticleVisibilityStatsFromHtml $html
+                Write-Warn ("Ticket $tid : 0 notas exportadas. No HTML: $($visStats.TotalRows) artigo(s), $($visStats.Visible) com VisibleForCustomer, $($visStats.NotVisible) internas.")
             }
             $cache.Update($tid, $ticket)
 
@@ -1473,8 +1564,9 @@ function Export-CcoReport {
         Write-Warn ("$emptyVisibleTickets chamado(s) sem notas visiveis ao cliente. Confirme o checkbox ""Ficar visivel para o Cliente"" no OTRS ou desative o filtro no menu 5.")
     }
     if (Get-CcoFilterVisibleOnly) {
-        Write-Info 'Filtro ativo: OTRS CustomerVisibilityFilter=1 (somente IsVisibleForCustomer no banco) + validacao CSS por linha.'
-        Write-Info 'Se ainda vierem notas internas, use exportacao com -DiagMode e confira diag_artigos_*.txt.'
+        Write-Host ("  Resumo filtro: $($totalNotesExported) nota(s) exportada(s), $($totalNotesSkippedInternal) nota(s) interna(s) ignorada(s).") -ForegroundColor Cyan
+        Write-Info 'Filtro: CustomerVisibilityFilter=1 na sessao OTRS (se disponivel) + classes VisibleForCustomer na ArticleTable.'
+        Write-Info 'Se ainda vierem notas internas: opcao 8 ou -DiagMode -> diag_artigos_*.txt; confira Ticket::Frontend::TicketArticleFilter no Znuny.'
     }
 
     if ($AbrirRelatorio) {
@@ -1602,6 +1694,7 @@ function Invoke-GerarTxt {
     Write-Info ("Servidor: " + $Cfg.BaseURL)
     Write-Info ("Usuario : " + $Cfg.Username)
     Write-Info ("Saida   : " + $Cfg.OutputPath)
+    Write-Info (Get-VisibleNotesFilterLabel ([bool]$Cfg.FilterCustomerVisibleNotesOnly))
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
@@ -1611,16 +1704,18 @@ function Invoke-GerarTxt {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    Sync-CcoConfigFromCfg $Cfg
     $params = @{
-        BaseURL         = $Cfg.BaseURL
-        Username        = $Cfg.Username
-        Password        = $Cfg.Password
-        SearchPath      = $Cfg.SearchPath
-        EstadoFile      = $Cfg.EstadoFile
-        OutputDir       = $Cfg.OutputPath
-        AbrirRelatorio  = $false
-        DiagMode        = $false
-        MaxNotesExport  = $maxNotesExport
+        BaseURL                        = $Cfg.BaseURL
+        Username                       = $Cfg.Username
+        Password                       = $Cfg.Password
+        SearchPath                     = $Cfg.SearchPath
+        EstadoFile                     = $Cfg.EstadoFile
+        OutputDir                      = $Cfg.OutputPath
+        AbrirRelatorio                 = $false
+        DiagMode                       = $false
+        MaxNotesExport                 = $maxNotesExport
+        FilterCustomerVisibleNotesOnly = [bool]$Cfg.FilterCustomerVisibleNotesOnly
     }
     try {
         Export-CcoReport @params
@@ -1653,6 +1748,7 @@ function Invoke-GerarJson {
     Write-Info ("Servidor: " + $Cfg.BaseURL)
     Write-Info ("Usuario : " + $Cfg.Username)
     Write-Info ("Saida   : " + $Cfg.OutputPath)
+    Write-Info (Get-VisibleNotesFilterLabel ([bool]$Cfg.FilterCustomerVisibleNotesOnly))
     Write-Host ""
     Write-ThinDiv 'DarkGray'
     Write-Host ""
@@ -1662,16 +1758,18 @@ function Invoke-GerarJson {
     } catch {
         Write-Err ("Falha ao carregar script: " + $_); Pause-Screen; return
     }
+    Sync-CcoConfigFromCfg $Cfg
     $params = @{
-        BaseURL         = $Cfg.BaseURL
-        Username        = $Cfg.Username
-        Password        = $Cfg.Password
-        SearchPath      = $Cfg.SearchPath
-        EstadoFile      = $Cfg.EstadoFile
-        OutputDir       = $Cfg.OutputPath
-        AbrirRelatorio  = $false
-        DiagMode        = $false
-        MaxNotesExport  = $maxNotesExport
+        BaseURL                        = $Cfg.BaseURL
+        Username                       = $Cfg.Username
+        Password                       = $Cfg.Password
+        SearchPath                     = $Cfg.SearchPath
+        EstadoFile                     = $Cfg.EstadoFile
+        OutputDir                      = $Cfg.OutputPath
+        AbrirRelatorio                 = $false
+        DiagMode                       = $false
+        MaxNotesExport                 = $maxNotesExport
+        FilterCustomerVisibleNotesOnly = [bool]$Cfg.FilterCustomerVisibleNotesOnly
     }
     try {
         Export-CcoReport @params
@@ -1796,8 +1894,14 @@ function Get-LiveTickets {
         [hashtable]$Cfg,
         # Se > 0, mantem apenas as N notas mais recentes (apos ordenacao cronologica no TicketData).
         # Se 0, retorna todas as notas obtidas do OTRS.
-        [int]$RecentArticlesOnly = 4
+        [int]$RecentArticlesOnly = 4,
+        [nullable[bool]]$FilterVisibleOnly = $null
     )
+    if ($null -ne $FilterVisibleOnly) {
+        Set-CcoVisibleNotesFilter ([bool]$FilterVisibleOnly)
+    } else {
+        Sync-CcoConfigFromCfg $Cfg
+    }
     $client = [OtrsClient]::new($Cfg.BaseURL, 45)
     try {
         $client.Login($Cfg.Username, $Cfg.Password)
@@ -2039,7 +2143,12 @@ function Show-VisualizadorCompleto {
 # -TodasNotas: todas as notas de cada chamado (MaxNotes 0 = rolagem por altura).
 # Caso contrario: apenas as 4 notas mais recentes por chamado.
 function Show-VisualizadorRealTime {
-    param([hashtable]$Cfg, [string]$ExportScript, [switch]$TodasNotas)
+    param(
+        [hashtable]$Cfg,
+        [string]$ExportScript,
+        [switch]$TodasNotas,
+        [nullable[bool]]$FilterVisibleOnly = $null
+    )
 
     $REFRESH_SEC = 60
     $recentParam = if ($TodasNotas) { 0 } else { 4 }
@@ -2057,12 +2166,14 @@ function Show-VisualizadorRealTime {
     if ($TodasNotas) {
         Write-Warn "Modo completo: cada atualizacao baixa todas as notas (pode ser lento)."
     }
+    $filtroVis = if ($null -ne $FilterVisibleOnly) { [bool]$FilterVisibleOnly } else { [bool]$Cfg.FilterCustomerVisibleNotesOnly }
+    Write-Info (Get-VisibleNotesFilterLabel $filtroVis)
     Write-Info "Conectando e buscando chamados ativos..."
     Write-Host ""
 
     try {
         Ensure-ExportScript $ExportScript
-        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
+        $tickets = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -FilterVisibleOnly $filtroVis
     } catch {
         Write-Err ("Falha ao buscar: " + $_); Pause-Screen; return
     }
@@ -2094,7 +2205,7 @@ function Show-VisualizadorRealTime {
         $elapsed = ([DateTime]::Now - $lastRefresh).TotalSeconds
         if (-not $keyFound -and $elapsed -ge $REFRESH_SEC) {
             try {
-                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
+                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -FilterVisibleOnly $filtroVis
                 $norm = Update-Normalizados $newT
                 $tickets = $newT
                 if ($idx -ge $tickets.Count) { $idx = 0 }
@@ -2114,7 +2225,7 @@ function Show-VisualizadorRealTime {
         elseif ($vk -eq 37 -or $vk -eq 33) { if ($idx -gt 0) { $idx-- } else { $idx=$tickets.Count-1 } }
         elseif ($ch -eq 'r' -or $ch -eq 'R') {
             try {
-                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam
+                $newT = Get-LiveTickets $Cfg -RecentArticlesOnly $recentParam -FilterVisibleOnly $filtroVis
                 $norm = Update-Normalizados $newT
                 $tickets = $newT
                 if ($idx -ge $tickets.Count) { $idx = 0 }
@@ -2153,7 +2264,7 @@ function Show-VisualizadorMenu {
         '4' {
             $prev = $script:CcoConfig.FilterCustomerVisibleNotesOnly
             Set-CcoVisibleNotesFilter $true
-            try { Show-VisualizadorRealTime $Cfg $ExportScript } finally { Set-CcoVisibleNotesFilter $prev }
+            try { Show-VisualizadorRealTime $Cfg $ExportScript -FilterVisibleOnly $true } finally { Set-CcoVisibleNotesFilter $prev }
         }
     }
 }

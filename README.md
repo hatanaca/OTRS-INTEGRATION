@@ -52,7 +52,7 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets`; **POST**/`PUT`. HTML de pré-visualização; com **`HubWebDriverEnabled`** o script **escreve directamente** no Gerador (WebDriver + JavaScript), numa janela nova ou no browser aberto (`HubWebDriverDebugAddress`). Após envio API, pode abrir o Hub (`HubEncaminharPath`).
 8. **Críticos visíveis** — Exportação dedicada: chamados do **perfil KPI** (`SearchPath`, ex. `Profile=94_8`) com **apenas notas visíveis ao cliente** (`IsVisibleForCustomer`), independentemente de `FilterCustomerVisibleNotesOnly` estar desligado nas opções 1–2. Gera os mesmos TXT/JSON de resumo que o relatório CCO. Limpa o cache automaticamente.
 
-**Diagnóstico de visibilidade:** na exportação com `-DiagMode`, o script grava `diag_main_*.html`, `diag_filtrado_*.html` e `diag_artigos_*.txt` (mapa `ArticleID` → exportar SIM/NAO) na pasta de saída.
+**Diagnóstico de visibilidade:** na exportação com `-DiagMode`, o script grava `diag_main_*.html`, `diag_filtrado_*.html` e `diag_artigos_*.txt` (mapa `ArticleID` → exportar SIM/NAO) na pasta de saída. No console, com filtro ativo, aparece o resumo `X nota(s) exportada(s), Y nota(s) interna(s) ignorada(s)`.
 
 ### Onde o OTRS grava “visível para o cliente”
 
