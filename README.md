@@ -33,7 +33,10 @@ As respostas HTML do Znuny/OTRS são decodificadas com o **charset** indicado no
 | `HubWebDriverDebugAddress` | (Opcional) Ligar ao Chrome/Edge **já aberto** (ex.: `127.0.0.1:9222`). Inicie o browser com `--remote-debugging-port=9222`; o Menu-OTRS não fecha essa janela. |
 | `HubWebDriverBrowser` | `Chrome` ou `Edge` (padrão `Chrome`). Usado com `HubWebDriverEnabled`. |
 | `HubSeleniumModulePath` | (Opcional) Caminho para `Selenium.psd1` ou para a pasta do módulo Selenium **copiada** (sem `Install-Module`). Vazio = usa `tools\Selenium\` junto ao `Menu-OTRS.ps1` ou o módulo na Gallery. |
-| `FilterCustomerVisibleNotesOnly` | Se `true` (padrão), aplica o filtro de sessão OTRS **`CustomerVisibilityFilter=1`** (somente artigos `IsVisibleForCustomer` no banco, quando `Ticket::Frontend::TicketArticleFilter` estiver ativo no Znuny) e valida cada linha pela classe **`VisibleForCustomer`** / **`NotVisibleForCustomer`**. O cache `estado_chamados.json` é **apagado automaticamente** ao gerar relatório com este filtro. Defina `false` para importar todas as notas. |
+| `FilterCustomerVisibleNotesOnly` | Se `true`, aplica o filtro de sessão OTRS **`CustomerVisibilityFilter=1`** (quando disponível no Znuny) e valida cada linha pela classe **`VisibleForCustomer`** / **`NotVisibleForCustomer`**. Padrão no exemplo: `false`. |
+| `FilterNotesByReportDynamicField` | Se `true` (padrão no exemplo), exporta **somente** notas com o campo dinâmico de artigo **`DynamicField_Enviarpararelatorio=Sim`** (checkbox **Enviar para relatório** ao criar a nota em `AgentTicketNote`). Equivalente ao script shell/curl que envia `DynamicField_Enviarpararelatorio=Sim` no POST. O cache `estado_chamados.json` é apagado quando qualquer filtro de notas está ativo. |
+| `ArticleDynamicFieldReportName` | Nome do campo dinâmico **sem** o prefixo `DynamicField_` (padrão `Enviarpararelatorio`). |
+| `ArticleDynamicFieldReportValue` | Valor exigido para incluir a nota (padrão `Sim`). |
 
 Copie `config.example.json` para `config.json` e preencha **Username**, **Password** (OTRS) e **HubPassword**. O arquivo `config.json` está no `.gitignore` (não vai para o Git). Na primeira execução, se `config.json` não existir, o `Menu-OTRS.ps1` cria uma cópia a partir de `config.example.json`. Também pode usar `scripts/Setup-Config.ps1`.
 
@@ -44,13 +47,16 @@ Copie `config.example.json` para `config.json` e preencha **Username**, **Passwo
 | `BaseURL` | `http://172.16.0.12/znuny` |
 | `SearchPath` | `index.pl?Action=AgentKPISearch;Subaction=Search;TakeLastSearch=1;Profile=94_8` |
 | `HubBaseURL` | `http://172.16.0.49:3210` |
-| `FilterCustomerVisibleNotesOnly` | `true` |
+| `FilterCustomerVisibleNotesOnly` | `false` |
+| `FilterNotesByReportDynamicField` | `true` |
+| `ArticleDynamicFieldReportName` | `Enviarpararelatorio` |
+| `ArticleDynamicFieldReportValue` | `Sim` |
 
-Após preencher credenciais, use a opção **8** (Críticos visíveis) ou **1**/**2** com filtro ativo. Apague `estado_chamados.json` se tiver exportado antes sem filtro.
+Após preencher credenciais, use a opção **9** (Críticos relatório) para o mesmo critério do script interceptador, **8** (visíveis ao cliente) ou **1**/**2** conforme `config.json`. Apague `estado_chamados.json` se tiver exportado antes com filtros diferentes.
 
 ## Menu principal
 
-1. **Gerar relatório TXT** — Formato WhatsApp/CCO; na mesma execução grava o `Relatorio_CCO_*.json` (resumo ativos/resolvidos). Por padrão, **só entram notas visíveis ao cliente** (checkbox “Ficar visível para o Cliente” no OTRS). Antes da exportação, pergunta se deseja **todas as notas** ou **apenas as 5 mais recentes** por chamado nos TXT e no JSON de resumo (o cache interno segue a mesma regra de visibilidade).
+1. **Gerar relatório TXT** — Formato WhatsApp/CCO; na mesma execução grava o `Relatorio_CCO_*.json` (resumo ativos/resolvidos). Por padrão (exemplo), **só entram notas com Enviar para relatório = Sim** (`DynamicField_Enviarpararelatorio`). Antes da exportação, pergunta se deseja **todas as notas** ou **apenas as 5 mais recentes** por chamado nos TXT e no JSON de resumo.
 2. **Gerar relatório JSON** — Mesmo fluxo do item 1: atualiza o cache a partir do OTRS, gera TXT e `Relatorio_CCO_*.json` na mesma execução, com a mesma opção de notas (**todas** vs **5 últimas**) no material exportado.
 3. **Visualizar chamados** — Submenu:
    - **OTRS tempo real (4 notas)** — Atualização a cada 60 s; **quatro notas mais recentes** por chamado (respeita o filtro de visibilidade ao cliente se estiver ativo).
@@ -61,9 +67,18 @@ Após preencher credenciais, use a opção **8** (Críticos visíveis) ou **1**/
 5. **Configurações** — Inclui URL do Hub.
 6. **Salvar credenciais** — Grava `config.json` (senha em texto claro).
 7. **Sincronizar com Hub** — Login em `/api/login`; **GET** `…/api/relatorio/tickets`; **POST**/`PUT`. HTML de pré-visualização; com **`HubWebDriverEnabled`** o script **escreve directamente** no Gerador (WebDriver + JavaScript), numa janela nova ou no browser aberto (`HubWebDriverDebugAddress`). Após envio API, pode abrir o Hub (`HubEncaminharPath`).
-8. **Críticos visíveis** — Exportação dedicada: chamados do **perfil KPI** (`SearchPath`, ex. `Profile=94_8`) com **apenas notas visíveis ao cliente** (`IsVisibleForCustomer`), independentemente de `FilterCustomerVisibleNotesOnly` estar desligado nas opções 1–2. Gera os mesmos TXT/JSON de resumo que o relatório CCO. Limpa o cache automaticamente.
+8. **Críticos visíveis** — Perfil KPI + **apenas** notas com “Ficar visível para o Cliente” (`IsVisibleForCustomer`), independentemente do `config.json`.
+9. **Críticos relatório** — Perfil KPI + **apenas** notas com `DynamicField_Enviarpararelatorio=Sim` (mesmo critério do POST `AgentTicketNote` do script shell/curl interceptador). Visibilidade ao cliente **desligada** nesta opção.
 
-**Diagnóstico de visibilidade:** na exportação com `-DiagMode`, o script grava `diag_main_*.html`, `diag_filtrado_*.html` e `diag_artigos_*.txt` (mapa `ArticleID` → exportar SIM/NAO) na pasta de saída. No console, com filtro ativo, aparece o resumo `X nota(s) exportada(s), Y nota(s) interna(s) ignorada(s)`.
+**Diagnóstico:** na exportação com `-DiagMode`, o script grava `diag_main_*.html`, `diag_filtrado_*.html` e `diag_artigos_*.txt` (colunas `visivel_cliente` e `enviar_relatorio` por `ArticleID`) na pasta de saída.
+
+### Onde o OTRS marca notas para o relatório
+
+| Tela | URL / `Action` | O que o Menu-OTRS usa |
+|------|----------------|------------------------|
+| **Adicionar nota** (popup) | `AgentTicketNote` — campo `DynamicField_Enviarpararelatorio=Sim` (**Enviar para relatório**) | **Sim** — ao enviar a nota (como no script curl: `Subaction=Store`, `DynamicField_Enviarpararelatorio=Sim`). |
+| **Adicionar nota** (popup) | `AgentTicketNote` — checkbox `IsVisibleForCustomer` | Opcional — filtro separado (`FilterCustomerVisibleNotesOnly`). |
+| **Detalhe do chamado** | `AgentTicketZoom` — widget do artigo (`ArticleMetaFields`) | **Sim** — `<label>Enviar para relatório</label><p class="Value">Sim</p>` dentro do bloco `Article{ArticleID}`. |
 
 ### Onde o OTRS grava “visível para o cliente”
 
@@ -74,7 +89,7 @@ Após preencher credenciais, use a opção **8** (Críticos visíveis) ou **1**/
 
 `BaseURL` deve incluir o prefixo do Znuny, por exemplo `http://servidor/znuny` (como no seu HTML: `/znuny/index.pl`).
 
-Para validar um chamado (ex. Ticket#882840096 / `TicketID=2840100`), abra o **chamado completo** no agente, use opção **8** ou export com `-DiagMode`, e confira `diag_artigos_*.txt`. Se precisar de suporte, envie o HTML de **AgentTicketZoom** (não o popup de nota).
+Para validar um chamado (ex. `TicketID=2840100`), abra o **chamado completo** no agente, use opção **9**, **8** ou export com `-DiagMode`, e confira `diag_artigos_*.txt`.
 
 ### Normalização (avisos ao operador)
 

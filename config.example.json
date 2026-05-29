@@ -19,5 +19,8 @@
   "HubWebDriverDebugAddress": "",
   "HubWebDriverBrowser": "Chrome",
   "HubSeleniumModulePath": "",
-  "FilterCustomerVisibleNotesOnly": true
+  "FilterCustomerVisibleNotesOnly": false,
+  "FilterNotesByReportDynamicField": true,
+  "ArticleDynamicFieldReportName": "Enviarpararelatorio",
+  "ArticleDynamicFieldReportValue": "Sim"
 }
