@@ -420,7 +420,18 @@ class OtrsClient {
             $uri = "$($this.BaseURL)/index.pl?Action=AgentTicketZoom;TicketID=$ticketID"
         }
         $response = $this.InvokeWithRetry($uri)
-        return $this.GetResponseText($response)
+        $html = $this.GetResponseText($response)
+        if (Test-OtrsHtmlIsTicketZoom $html) { return $html }
+        if (Test-OtrsHtmlIsComposeNoteForm $html) {
+            Write-Verbose "Ticket $ticketID : primeira resposta foi AgentTicketNote; tentando AgentTicketZoom explicito."
+            $retryUri = "$($this.BaseURL)/index.pl?Action=AgentTicketZoom;Subaction=;TicketID=$ticketID"
+            if ($articlePage -gt 0) { $retryUri += ";ArticlePage=$articlePage" }
+            $retry = $this.InvokeWithRetry($retryUri)
+            $retryHtml = $this.GetResponseText($retry)
+            if (Test-OtrsHtmlIsTicketZoom $retryHtml) { return $retryHtml }
+            if (-not (Test-OtrsHtmlIsComposeNoteForm $retryHtml)) { return $retryHtml }
+        }
+        return $html
     }
 
   # Filtro nativo Znuny (requer Ticket::Frontend::TicketArticleFilter no servidor).
@@ -1353,14 +1364,32 @@ function Test-OtrsHtmlIsTicketZoom {
     if ($HTML -match 'id="ArticleTable"|id="ArticleTableBody"') { return $true }
     if ($HTML -match '<tr[^>]*\bid="Row\d+"[^>]*>[\s\S]*?class="ArticleID"') { return $true }
     if ($HTML -match 'class="[^"]*\bWidgetSimple\b[^"]*\b(?:VisibleForCustomer|NotVisibleForCustomer)\b') { return $true }
+    if ($HTML -match 'ArticleIDs"\s*:\s*\[') { return $true }
+    if ($HTML -match '(?is)<a\s+[^>]*\b(?:id|name)\s*=\s*["'']Article\d+["'']') { return $true }
     return $false
+}
+
+function Get-OtrsHtmlHiddenAction {
+    param([string]$HTML)
+    if (-not $HTML) { return '' }
+    foreach ($pat in @(
+        '(?is)<input[^>]*\bname\s*=\s*["'']Action["''][^>]*\bvalue\s*=\s*["'']([^"'']+)["'']',
+        '(?is)<input[^>]*\bvalue\s*=\s*["'']([^"'']+)["''][^>]*\bname\s*=\s*["'']Action["'']'
+    )) {
+        if (($m = [regex]::Match($HTML, $pat)).Success) { return $m.Groups[1].Value.Trim() }
+    }
+    return ''
 }
 
 function Test-OtrsHtmlIsComposeNoteForm {
     param([string]$HTML)
     if (-not $HTML) { return $false }
-    if ($HTML -match 'name="Action"\s+value="AgentTicketNote"' -or $HTML -match "Action=AgentTicketNote") { return $true }
-    if ($HTML -match 'id="Compose"' -and $HTML -match 'name="IsVisibleForCustomer"') { return $true }
+    # AgentTicketZoom traz links/menus com Action=AgentTicketNote; nao confundir com o popup de nota.
+    if (Test-OtrsHtmlIsTicketZoom $HTML) { return $false }
+    $action = Get-OtrsHtmlHiddenAction $HTML
+    if ($action -ceq 'AgentTicketNote') { return $true }
+    if ($HTML -match 'id="Compose"' -and $HTML -match 'name="IsVisibleForCustomer"' -and $HTML -notmatch 'id="ArticleTable"') { return $true }
+    if ($HTML -match '(?is)<form[^>]*\bAction=AgentTicketNote\b' -and $HTML -notmatch 'id="ArticleTable"') { return $true }
     return $false
 }
 
@@ -1506,9 +1535,10 @@ function Get-TicketDataFromHtml {
     }
 
     if (Test-OtrsHtmlIsComposeNoteForm $HTML) {
-        Write-Warning "Ticket $ticketID : HTML recebido parece ser o popup ""Adicionar nota"" (AgentTicketNote), nao a tela do chamado (AgentTicketZoom). O export de notas exige a lista de artigos do chamado."
+        $hiddenAction = Get-OtrsHtmlHiddenAction $HTML
+        Write-Warning "Ticket $ticketID : HTML recebido e o formulario ""Adicionar nota"" (AgentTicketNote$(if ($hiddenAction) { ", Action=$hiddenAction" })), nao AgentTicketZoom. Abra o chamado completo no agente ou verifique sessao/login."
         if ($PassThruStats) {
-            return [PSCustomObject]@{ Ticket = $null; Exported = 0; SkippedInternal = 0 }
+            return [PSCustomObject]@{ Ticket = $null; Exported = 0; SkippedInternal = 0; SkippedReportField = 0 }
         }
         return $null
     }
@@ -1664,11 +1694,15 @@ function Read-NotasExportOption {
     Write-Host "  [2] Apenas as 5 mais recentes"
     Write-Host "  Opcao [1]: " -ForegroundColor Cyan -NoNewline
     $o = (Read-Host).Trim()
+    $filterHint = @()
+    if (Get-CcoFilterVisibleOnly) { $filterHint += 'visibilidade ao cliente' }
+    if (Get-CcoFilterReportDynamicFieldOnly) { $filterHint += 'Enviar para relatorio' }
+    $filterText = if ($filterHint.Count -gt 0) { ($filterHint -join ' + ') } else { 'sem filtro de notas' }
     if ($o -eq '2') {
-        Write-Info "Exportacao com as 5 notas mais recentes por chamado (entre as notas que passarem no filtro de visibilidade)."
+        Write-Info ("Exportacao com as 5 notas mais recentes por chamado (filtros ativos: " + $filterText + ").")
         return 5
     }
-    Write-Info "Exportacao com todas as notas obtidas de cada chamado (respeitando filtro de visibilidade ao cliente)."
+    Write-Info ("Exportacao com todas as notas obtidas de cada chamado (filtros ativos: " + $filterText + ").")
     return 0
 }
 
