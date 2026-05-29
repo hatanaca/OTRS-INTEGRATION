@@ -296,6 +296,7 @@ $script:CcoConfig = @{
         'Estado do link Zabbix',
         'Status:\s*(OK|PROBLEM|DISASTER)'
     )
+    FilterCustomerVisibleNotesOnly = $true
 }
 
 # =============================================================================
@@ -706,18 +707,78 @@ function Test-AutoNote {
     return $false
 }
 
+function Get-CcoFilterVisibleOnly {
+    if ($null -eq $script:CcoConfig) { return $true }
+    $v = $script:CcoConfig.FilterCustomerVisibleNotesOnly
+    if ($null -eq $v) { return $true }
+    return [bool]$v
+}
+
+function Get-ArticleIdFromRowHtml {
+    param([string]$RowHtml)
+    if (-not $RowHtml) { return $null }
+    $patterns = @(
+        'class="[^"]*\bArticleID\b[^"]*"[^>]*value="(\d+)"',
+        'value="(\d+)"[^>]*class="[^"]*\bArticleID\b[^"]*"',
+        'name="ArticleID"[^>]*value="(\d+)"',
+        'class="ArticleID"[^>]*value="(\d+)"'
+    )
+    foreach ($p in $patterns) {
+        if (($m = [regex]::Match($RowHtml, $p)).Success) { return $m.Groups[1].Value }
+    }
+    return $null
+}
+
+function Get-ArticleDateFromRowHtml {
+    param([string]$RowHtml)
+    if (-not $RowHtml) { return 'N/D' }
+    $patterns = @(
+        '<td class="Created">[^<]*<div title="([^"]+)"',
+        '<td[^>]*class="[^"]*Created[^"]*"[^>]*>.*?title="([^"]+)"'
+    )
+    foreach ($p in $patterns) {
+        if (($m = [regex]::Match($RowHtml, $p)).Success) { return $m.Groups[1].Value }
+    }
+    return 'N/D'
+}
+
+function Get-TicketArticleRowsFromHtml {
+    param([string]$HTML)
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $seen = @{}
+    $patterns = @(
+        '(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>',
+        '(?s)<tr([^>]*)>(.*?)</tr>'
+    )
+    foreach ($pat in $patterns) {
+        foreach ($row in [regex]::Matches($HTML, $pat)) {
+            $rowTag  = $row.Groups[1].Value
+            $rowHtml = $row.Groups[2].Value
+            if ($rowHtml -notmatch 'ArticleID') { continue }
+            $aid = Get-ArticleIdFromRowHtml $rowHtml
+            if (-not $aid -or $seen.ContainsKey($aid)) { continue }
+            $seen[$aid] = $true
+            $rows.Add([PSCustomObject]@{
+                RowTag    = $rowTag
+                RowHtml   = $rowHtml
+                ArticleId = $aid
+            })
+        }
+    }
+    return $rows
+}
+
 function Test-ArticleRowVisibleForCustomer {
     param(
         [string]$RowTagAttributes,
         [string]$RowHtml = ''
     )
-    # Znuny marca artigos com checkbox "Ficar visivel para o Cliente" (IsVisibleForCustomer)
-    # com classe CSS VisibleForCustomer na linha da tabela do AgentTicketZoom.
+    # Znuny: checkbox IsVisibleForCustomer -> classe VisibleForCustomer na linha do artigo.
     $blob = ($RowTagAttributes + ' ' + $RowHtml)
     if (-not $blob.Trim()) { return $false }
     if ($blob -match '\bVisibleForCustomer\b') { return $true }
     if ($blob -match '(?i)isvisibleforcustomer') { return $true }
-    if ($blob -match '(?i)vis[ií]vel\s+para\s+o\s+cliente') { return $true }
+    if ($blob -match '(?i)vis[i\xED]vel\s+para\s+o\s+cliente') { return $true }
     if ($blob -match '(?i)visible\s+for\s+(the\s+)?customer') { return $true }
     return $false
 }
@@ -732,6 +793,10 @@ function Get-VisibleNotesFilterLabel {
 
 function Set-CcoVisibleNotesFilter {
     param([bool]$Enabled)
+    if ($null -eq $script:CcoConfig) {
+        $script:CcoConfig = @{ FilterCustomerVisibleNotesOnly = $Enabled }
+        return
+    }
     $script:CcoConfig.FilterCustomerVisibleNotesOnly = $Enabled
 }
 
@@ -826,20 +891,22 @@ function Get-TicketDataFromHtml {
     }
 
     $articles = [System.Collections.Generic.List[object]]::new()
-    $filterVisibleOnly = $script:CcoConfig.FilterCustomerVisibleNotesOnly
-    $rowPattern = @'
-(?s)<tr([^>]*\bid="Row\d+"[^>]*)>(.*?)</tr>
-'@
-    $rowMatches = [regex]::Matches($HTML, $rowPattern)
+    $filterVisibleOnly = Get-CcoFilterVisibleOnly
+    $rowMatches = Get-TicketArticleRowsFromHtml $HTML
+    $skippedVisible = 0
+
+    if ($rowMatches.Count -eq 0) {
+        Write-Verbose "Nenhuma linha de artigo encontrada no HTML do ticket $ticketID (verifique AgentTicketZoom / lista de artigos)."
+    }
 
     foreach ($row in $rowMatches) {
-        $rowTag = $row.Groups[1].Value
-        $rowHtml = $row.Groups[2].Value
-        if (($m = [regex]::Match($rowHtml, '<input[^>]+class="ArticleID"[^>]+value="(\d+)"')).Success) { $aid = $m.Groups[1].Value } else { $aid = $null }
-        if (($m = [regex]::Match($rowHtml, '<td class="Created">[^<]*<div title="([^"]+)"')).Success) { $adate = $m.Groups[1].Value } else { $adate = 'N/D' }
-        if (-not $aid) { continue }
+        $rowTag  = $row.RowTag
+        $rowHtml = $row.RowHtml
+        $aid     = $row.ArticleId
+        $adate   = Get-ArticleDateFromRowHtml $rowHtml
         if ($filterVisibleOnly -and -not (Test-ArticleRowVisibleForCustomer -RowTagAttributes $rowTag -RowHtml $rowHtml)) {
             Write-Verbose "Artigo $aid ignorado (nao marcado como visivel ao cliente) ticket $ticketID"
+            $skippedVisible++
             continue
         }
         try {
@@ -862,6 +929,9 @@ function Get-TicketDataFromHtml {
             }
             Start-Sleep -Milliseconds $sleepMs
         } catch { Write-Verbose "Erro ao obter artigo $aid para ticket $ticketID" }
+    }
+    if ($filterVisibleOnly -and $rowMatches.Count -gt 0 -and $articles.Count -eq 0) {
+        Write-Verbose "Ticket $ticketID : $($rowMatches.Count) artigo(s) na tela, 0 visiveis ao cliente ($skippedVisible ignorados). Marque ""Ficar visivel para o Cliente"" ou desative o filtro no menu 5."
     }
     $articles.Reverse()
     return [TicketData]::new($numero, $estado, $criado, $cliente, $unidade, $articles)
@@ -975,11 +1045,11 @@ function Export-CcoReport {
         [int]$MaxNotesExport = 0,
         [switch]$AbrirRelatorio,
         [switch]$DiagMode,
-        [Nullable[bool]]$FilterCustomerVisibleNotesOnly = $null
+        $FilterCustomerVisibleNotesOnly = $null
     )
 
-    $filterOverridden = ($null -ne $FilterCustomerVisibleNotesOnly)
-    $prevVisibleFilter = $script:CcoConfig.FilterCustomerVisibleNotesOnly
+    $filterOverridden = $PSBoundParameters.ContainsKey('FilterCustomerVisibleNotesOnly')
+    $prevVisibleFilter = Get-CcoFilterVisibleOnly
     if ($filterOverridden) {
         Set-CcoVisibleNotesFilter ([bool]$FilterCustomerVisibleNotesOnly)
     }
@@ -998,7 +1068,7 @@ function Export-CcoReport {
     Write-Verbose "Perfil: $SearchPath"
     Write-Verbose "Cache: $EstadoFile"
     Write-Verbose "MaxNotesExport (TXT): $(if ($MaxNotesExport -gt 0) { $MaxNotesExport } else { 'todas' })"
-    Write-Verbose "FilterCustomerVisibleNotesOnly: $($script:CcoConfig.FilterCustomerVisibleNotesOnly)"
+    Write-Verbose "FilterCustomerVisibleNotesOnly: $(Get-CcoFilterVisibleOnly)"
 
     $client = [OtrsClient]::new($BaseURL, $RetryMax)
     $client.Login($Username, $Password)
@@ -1062,8 +1132,11 @@ function Export-CcoReport {
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    $emptyVisibleTickets = 0
+
     foreach ($tid in $allIds) {
-        Write-Progress -Activity "Processando tickets" -Status "Ticket $tid" -PercentComplete (($httpCount+$cacheHits)/$allIds.Count*100)
+        $pct = if ($allIds.Count -gt 0) { (($httpCount + $cacheHits) / $allIds.Count * 100) } else { 0 }
+        Write-Progress -Activity "Processando tickets" -Status "Ticket $tid" -PercentComplete $pct
 
         if ($cache.IsCachedAndResolved($tid) -and $tid -notin $activeIds) {
             Write-Verbose "TID $tid - CACHE"
@@ -1081,6 +1154,9 @@ function Export-CcoReport {
             if (-not $ticket) {
                 Write-Warning "Nao foi possivel extrair dados do ticket $tid"
                 continue
+            }
+            if ((Get-CcoFilterVisibleOnly) -and $ticket.Articles.Count -eq 0) {
+                $emptyVisibleTickets++
             }
             $cache.Update($tid, $ticket)
 
@@ -1115,6 +1191,9 @@ function Export-CcoReport {
     }
 
     Write-Host "Processados: $($allIds.Count) | Cache: $cacheHits | HTTP: $httpCount | Tempo: $($stopwatch.Elapsed.ToString('mm\:ss'))" -ForegroundColor Green
+    if ((Get-CcoFilterVisibleOnly) -and $emptyVisibleTickets -gt 0) {
+        Write-Warn ("$emptyVisibleTickets chamado(s) sem notas visiveis ao cliente. Confirme o checkbox ""Ficar visivel para o Cliente"" no OTRS ou desative o filtro no menu 5.")
+    }
 
     if ($AbrirRelatorio) {
         Start-Process notepad.exe $ativoPath
@@ -3052,50 +3131,6 @@ function Invoke-SyncHub {
     Write-Divider 'DarkGray'
     Write-OK ($nNew.ToString() + " adicionados   " + $nUpd.ToString() + " atualizados   " + $nSkip.ToString() + " sem alteracao")
     Pause-Screen
-}
-
-# =============================================================================
-# Configuracoes centralizadas
-# =============================================================================
-$now = Get-Date
-$standardHour = [math]::Floor([int]$now.Hour / 2) * 2
-$standardHourStr = $standardHour.ToString('00')
-$script:CcoConfig = @{
-    TituloRelatorio  = "Chamados Cr" + [char]237 + "ticos - " + $now.ToString('dd/MM/yyyy') + " " + $standardHourStr + "h"
-    TituloResolvidos = "Chamados Normalizados - " + $now.ToString('dd/MM/yyyy') + " " + $standardHourStr + "h"
-    LabelHorario     = "Hor" + [char]225 + "rio de abertura"
-    LabelOcorrencia  = "Ocorr" + [char]234 + "ncia"
-    Separador        = "*--------------------------------------------------------------*"
-    EstadosResolvidos = @('resolvido','fechado','removido','encerrado','resolved','closed','merged','agrupado')
-    AutoNotePatterns = @(
-        'Sistema de Monitoramento',
-        'Host:.*IP:.*Incidente:',
-        'Prioridade:\s*(Disaster|High|Average|Information)',
-        'Agradecemos seu contato',
-        'solicita.{1,10}ser.{1,5}tratada atrav',
-        'sob os cuidados da nossa equipe',
-        'Para mais informa.{1,10}contate',
-        'Para proteger sua privacidade',
-        'conte.do remoto foi desabilitado',
-        'Carregar conte.do bloqueado',
-        'Chamado enviada para campo',
-        'atingiu.{1,20}(HORAS|HORA|DUAS)',
-        'Para seu conhecimento.*O Ticket',
-        'Notifica.{1,5}o de Eventos',
-        'Por favor, verificar o Incidente conforme dados',
-        'Raz.o Social:.*CNPJ:.*Dificuldade',
-        'Alerta - \[Ticket#',
-        'Direcionamento de Ticket',
-        'ticket.*foi direcionado',
-        'COMUNICADO.*chave de e.mail',
-        'plantao.*fora do hor',
-        'Problema com Status OK',
-        'Problema persiste',
-        'Gr.ficos personalizados',
-        'Estado do link Zabbix',
-        'Status:\s*(OK|PROBLEM|DISASTER)'
-    )
-    FilterCustomerVisibleNotesOnly = $true
 }
 
 # =============================================================================
