@@ -968,6 +968,23 @@ function Get-TicketArticleRowsFromHtml {
     return $rows
 }
 
+function Test-OtrsHtmlIsTicketZoom {
+    param([string]$HTML)
+    if (-not $HTML) { return $false }
+    if ($HTML -match 'id="ArticleTable"|id="ArticleTableBody"') { return $true }
+    if ($HTML -match '<tr[^>]*\bid="Row\d+"[^>]*>[\s\S]*?class="ArticleID"') { return $true }
+    if ($HTML -match 'class="[^"]*\bWidgetSimple\b[^"]*\b(?:VisibleForCustomer|NotVisibleForCustomer)\b') { return $true }
+    return $false
+}
+
+function Test-OtrsHtmlIsComposeNoteForm {
+    param([string]$HTML)
+    if (-not $HTML) { return $false }
+    if ($HTML -match 'name="Action"\s+value="AgentTicketNote"' -or $HTML -match "Action=AgentTicketNote") { return $true }
+    if ($HTML -match 'id="Compose"' -and $HTML -match 'name="IsVisibleForCustomer"') { return $true }
+    return $false
+}
+
 function Test-ArticleRowVisibleForCustomer {
     param(
         [string]$RowTagAttributes,
@@ -1098,13 +1115,21 @@ function Get-TicketDataFromHtml {
         Write-Verbose "Apos ajuste: Cliente=$cliente, Unidade=$unidade"
     }
 
+    if (Test-OtrsHtmlIsComposeNoteForm $HTML) {
+        Write-Warning "Ticket $ticketID : HTML recebido parece ser o popup ""Adicionar nota"" (AgentTicketNote), nao a tela do chamado (AgentTicketZoom). O export de notas exige a lista de artigos do chamado."
+        return $null
+    }
+    if (-not (Test-OtrsHtmlIsTicketZoom $HTML)) {
+        Write-Verbose "Ticket $ticketID : HTML sem ArticleTable/RowN tipicos do AgentTicketZoom; tentando extrair artigos mesmo assim."
+    }
+
     $articles = [System.Collections.Generic.List[object]]::new()
     $filterVisibleOnly = Get-CcoFilterVisibleOnly
     $rowMatches = Get-TicketArticleRowsFromHtml $HTML
     $skippedVisible = 0
 
     if ($rowMatches.Count -eq 0) {
-        Write-Verbose "Nenhuma linha de artigo encontrada no HTML do ticket $ticketID (verifique AgentTicketZoom / lista de artigos)."
+        Write-Verbose "Nenhuma linha de artigo encontrada no HTML do ticket $ticketID (abra o chamado em AgentTicketZoom, nao no formulario de nota)."
     }
 
     foreach ($row in $rowMatches) {

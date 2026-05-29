@@ -54,6 +54,17 @@ Copie `config.example.json` para `config.json` e preencha. O arquivo `config.jso
 
 **Diagnóstico de visibilidade:** na exportação com `-DiagMode`, o script grava `diag_main_*.html`, `diag_filtrado_*.html` e `diag_artigos_*.txt` (mapa `ArticleID` → exportar SIM/NAO) na pasta de saída.
 
+### Onde o OTRS grava “visível para o cliente”
+
+| Tela | URL / `Action` | O que o Menu-OTRS usa |
+|------|----------------|------------------------|
+| **Adicionar nota** (popup) | `AgentTicketNote` — checkbox `IsVisibleForCustomer` (“Ficar visível para o Cliente”) | **Não** — só define a visibilidade **ao enviar** a nota nova. |
+| **Detalhe do chamado** | `AgentTicketZoom` — tabela de artigos (`ArticleTable`) | **Sim** — cada linha `<tr id="Row1" …>` traz a classe **`VisibleForCustomer`** ou **`NotVisibleForCustomer`** conforme o valor já salvo no banco. |
+
+`BaseURL` deve incluir o prefixo do Znuny, por exemplo `http://servidor/znuny` (como no seu HTML: `/znuny/index.pl`).
+
+Para validar um chamado (ex. Ticket#882840096 / `TicketID=2840100`), abra o **chamado completo** no agente, use opção **8** ou export com `-DiagMode`, e confira `diag_artigos_*.txt`. Se precisar de suporte, envie o HTML de **AgentTicketZoom** (não o popup de nota).
+
 ### Normalização (avisos ao operador)
 
 Nos modos em tempo real e ao recarregar o cache (`R` no visualizador offline), se o **estado** de um chamado passar a um valor considerado resolvido/normalizado (resolvido, fechado, merged, etc.), é exibido um **alerta em tela cheia** listando os chamados afetados.
